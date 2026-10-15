@@ -34,7 +34,8 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 // Change these numbers to adjust how attacks are detected and how hits feel.
 const CONFIG = {
   // --- Size ---
-  playerScale: 0.6,          // 1 = real height, 0.6 = Gorilla Tag-style small player (eyes about 1 m up)
+  eyeHeight: 1.0,            // meters: how high your eyes are in the game. Your arms stay full length,
+                             // so the ground ends up around your waist, like Gorilla Tag
   dummyScale: 0.6,           // dummy size; matches the player by default
   // --- Gorilla Tag movement ---
   handRadius: 0.06,          // meters: size of each hand's collider (in world size)
@@ -54,7 +55,7 @@ const CONFIG = {
   stabMaxSpin: 10,           // rad/s: twisting faster than this means it's not a punch
   stabLookback: 0.8,         // seconds of hand history used to measure the pull-back
   cooldown: 0.35,            // seconds before the same hand can attack again
-  hitRange: 2.6,             // meters at real size: how far attacks reach (shrinks with playerScale)
+  hitRange: 1.8,             // meters: how far attacks reach
   hitConeDeg: 60,            // degrees: how far off-center the dummy can be and still get hit
   knockBase: [0, 1.8, 2.6, 4.0], // knockback speed per tier (tier 1 normals only stun)
   knockScale: 60,            // damage % that doubles knockback
@@ -85,15 +86,16 @@ scene.background = new THREE.Color(0x7ec8ff);
 scene.fog = new THREE.Fog(0x7ec8ff, 20, 70);
 
 // The rig is the player's body: the headset and controllers live inside it, and movement moves the rig.
-const S = CONFIG.playerScale;
+// The rig sits below the game floor by `drop`, so your view is lower but your arms reach the ground.
 const SPAWN = new THREE.Vector3(0, 0, 0);
+let drop = 0;
+let heightFrames = 0;
 const rig = new THREE.Group();
-rig.scale.setScalar(S);
 rig.position.copy(SPAWN);
 scene.add(rig);
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.02, 200);
-camera.position.set(0, 1.7, 2.0);   // only used on a computer; the headset sets this in VR
+camera.position.set(0, 1.1, 2.0);   // only used on a computer; the headset sets this in VR
 camera.lookAt(-0.4, 1.0, -3);
 rig.add(camera);
 
@@ -327,8 +329,9 @@ function updateMovement(dt) {
   }
 
   // Standing on the ground
-  const g = groundUnder(P, prevP.y);
-  if (g !== null) { P.y = g; if (bodyVel.y < 0) bodyVel.y = 0; playerGrounded = true; }
+  const feet = tmpV.set(P.x, P.y + drop, P.z);
+  const g = groundUnder(feet, prevP.y + drop);
+  if (g !== null) { P.y = g - drop; if (bodyVel.y < 0) bodyVel.y = 0; playerGrounded = true; }
   else playerGrounded = false;
 
   // Launch speed when the last hand lets go
@@ -348,7 +351,7 @@ function updateMovement(dt) {
 
   // Fell off the stage
   if (P.y < -10) {
-    P.copy(SPAWN); bodyVel.set(0, 0, 0); posHistory.length = 0;
+    P.copy(SPAWN); P.y -= drop; bodyVel.set(0, 0, 0); posHistory.length = 0;
     for (const h of hands) h.touching = false;
     last = { title: 'You fell!', color: '#ff4f6d', sub: 'Back to spawn', detail: '', result: '' };
     log('You fell off. Back to spawn', '#ff4f6d');
@@ -425,7 +428,7 @@ function updateHand(h, dt) {
   }
 
   // Stab: straight thrust forward with little spin
-  const fwd = tmpV.copy(h.pos).sub(headPos).dot(F) / S;   // in real-world meters
+  const fwd = tmpV.copy(h.pos).sub(headPos).dot(F);
   h.hist.push({ t: now, f: fwd });
   while (h.hist.length && now - h.hist[0].t > CONFIG.stabLookback) h.hist.shift();
   if (h.prevFwd !== null && dt > 0) h.fwdSpeed = THREE.MathUtils.lerp(h.fwdSpeed, (fwd - h.prevFwd) / dt, 0.5);
@@ -451,10 +454,23 @@ function updateHand(h, dt) {
 }
 
 function calibrate(h) {
-  const fwd = tmpV.copy(h.pos).sub(headPos).dot(F) / S;
+  const fwd = tmpV.copy(h.pos).sub(headPos).dot(F);
   reach = Math.max(0.35, fwd);
+  calibrateHeight();
   log(`Reach set to ${reach.toFixed(2)} m`, '#ffffff');
 }
+
+// Lowers the game world under you so your eyes sit at CONFIG.eyeHeight, keeping your feet where they are
+function calibrateHeight() {
+  if (!renderer.xr.isPresenting) return;
+  const real = camera.position.y;   // headset height above your real floor
+  if (real < 0.5) return;
+  const next = Math.max(0, real - CONFIG.eyeHeight);
+  P.y += drop - next;
+  drop = next;
+  log(`Height set: eyes ${CONFIG.eyeHeight.toFixed(1)} m up in game`, '#ffffff');
+}
+renderer.xr.addEventListener('sessionstart', () => { heightFrames = 0; });
 
 // ================= ATTACKS & HITS =================
 function fireAttack(h, dir, tier, special, detail) {
@@ -471,7 +487,7 @@ function fireAttack(h, dir, tier, special, detail) {
   const dist = away.length();
   if (dist > 0.001) away.divideScalar(dist); else away.copy(F);
   const off = THREE.MathUtils.radToDeg(away.angleTo(F));
-  const hit = dummy.visible && D.ringOut <= 0 && dist <= CONFIG.hitRange * S && off <= CONFIG.hitConeDeg;
+  const hit = dummy.visible && D.ringOut <= 0 && dist <= CONFIG.hitRange && off <= CONFIG.hitConeDeg;
 
   const result = hit ? hitDummy(dir, tier, special, away) : 'Missed: dummy out of range';
   pulse(h, hit ? 0.3 + tier * 0.2 : 0.15, hit ? 50 + tier * 30 : 25);
@@ -658,6 +674,11 @@ renderer.setAnimationLoop(() => {
   now += dt;
 
   for (const h of hands) if (!h.src) h.touching = false;
+  // Set your game height automatically about half a second after entering VR
+  if (renderer.xr.isPresenting && heightFrames >= 0 && ++heightFrames > 45) {
+    calibrateHeight();
+    heightFrames = -1;
+  }
   updateMovement(dt);
 
   // In VR, three.js copies the headset pose onto this camera, so this works in both modes
