@@ -51,6 +51,7 @@ const CONFIG = {
   platformPushSpeed: 1.5,    // m/s: how hard you must push a hand downward in mid-air to spawn one
   platformLife: 0.6,         // seconds a platform lasts
   platformSize: 0.35,        // meters across
+  platformWallGap: 0.3,      // meters: no air platforms when your hand is this close to a wall or ledge
   // --- Light attacks (hold trigger and punch) ---
   punchSpeed: 3.0,           // m/s: how fast your fist must move to count as an attack
   upDownAmount: 0.6,         // 0-1: how straight up/down a punch must be to count as uppercut/ground pound
@@ -60,7 +61,7 @@ const CONFIG = {
   jabComboWindow: 1.0,       // seconds between jabs before the 4-jab combo resets
   jabDamage: 3, jabFinisherDamage: 5, uppercutDamage: 7, poundDamage: 7,   // damage % per hit
   jabFinisherKnock: 2.5,     // m/s: knockback from the 4th jab
-  uppercutLaunch: 5.5,       // m/s: how hard the uppercut launches upward
+  uppercutLaunch: 2.75,     // m/s: how hard the uppercut launches upward
   poundSpike: 9,             // m/s: how hard a ground pound slams an airborne dummy down
   poundBounce: 2.2,          // m/s: how high the dummy pops up after being pounded into the ground
   bounciness: 0.35,          // how much a slammed dummy bounces off the floor (0 = none)
@@ -112,7 +113,7 @@ function addBox(minX, minY, minZ, maxX, maxY, maxZ, color, rimColor) {
   scene.add(mesh);
   if (rimColor) {
     const rim = new THREE.Mesh(new THREE.BoxGeometry(w + 0.02, 0.06, d + 0.02), new THREE.MeshStandardMaterial({ color: rimColor }));
-    rim.position.set(mesh.position.x, maxY - 0.03, mesh.position.z);
+    rim.position.set(mesh.position.x, maxY - 0.04, mesh.position.z);   // top sits just below the floor so they don't flicker
     scene.add(rim);
   }
   BOXES.push(box);
@@ -177,6 +178,18 @@ function penetration(p, r) {
     }
   }
   return bestN ? { n: bestN, depth: bestDepth, box: bestBox } : null;
+}
+
+// True if point p is within `gap` meters of any real (non-platform) surface
+function nearSolid(p, gap) {
+  for (const b of BOXES) {
+    if (b.temp) continue;
+    const dx = Math.max(b.min.x - p.x, 0, p.x - b.max.x);
+    const dy = Math.max(b.min.y - p.y, 0, p.y - b.max.y);
+    const dz = Math.max(b.min.z - p.z, 0, p.z - b.max.z);
+    if (dx * dx + dy * dy + dz * dz < gap * gap) return true;
+  }
+  return false;
 }
 
 // Air jump platforms: short-lived boxes that appear under your hand
@@ -395,7 +408,7 @@ function updateMovement(dt) {
     for (const h of active) {
       if (!handFree(h) || h.localVel.y > -CONFIG.platformPushSpeed || now - h.lastPlatform < 0.25) continue;
       h.grip.getWorldPosition(handWorld);
-      if (penetration(handWorld, CONFIG.handRadius)) continue;   // already touching something real
+      if (nearSolid(handWorld, CONFIG.platformWallGap)) continue;   // near a wall or ledge: grab it instead
       spawnPlatform(handWorld);
       platformsLeft--;
       h.lastPlatform = now;
