@@ -267,7 +267,7 @@ for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
   rig.add(ray, grip);
   const fistMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x000000 });
-  const fist = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.11), fistMat);
+  const fist = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.13), fistMat);
   grip.add(fist);
   const shield = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.02, 24),
     new THREE.MeshStandardMaterial({ color: 0x4fc3ff, transparent: true, opacity: 0.5 }));
@@ -290,7 +290,7 @@ for (let i = 0; i < 2; i++) {
   ray.addEventListener('connected', e => {
     h.src = e.data;
     h.side = e.data.handedness || 'hand';
-    fistMat.color.set(h.side === 'left' ? 0x8fd3ff : 0xffb38f);
+    fistMat.color.set(0xe8453c);   // red boxing-glove color, stands out against the sky
   });
   ray.addEventListener('disconnected', () => { h.src = null; h.hasPrev = false; });
   hands.push(h);
