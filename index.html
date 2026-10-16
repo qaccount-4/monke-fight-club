@@ -22,8 +22,9 @@
 <div id="info">
   <h1>VR Brawler: Gesture Tester</h1>
   <p>Open this page in the Meta Quest Browser and press <b>Enter VR</b>. Wear your wrist straps and clear your space.</p>
-  <p><b>No buttons</b>: grab the ground or walls and push to move, like Gorilla Tag · in mid-air, push a hand down hard for an air platform (3 per jump) · <b>Trigger + punch</b> = jab (either hand) · <b>Grip + punch</b> = power jab · <b>Trigger + grip</b> = block · <b>A/X</b> with arm straight out = set reach · <b>B/Y</b> = reset dummy</p>
-  <p>On a computer: <kbd>1</kbd> left jab <kbd>2</kbd> right jab · hold <kbd>Shift</kbd> for power jab · <kbd>T</kbd> changes tier · <kbd>R</kbd> resets dummy</p>
+  <p><b>No buttons</b>: grab the ground or walls and push to move, like Gorilla Tag · in mid-air, push a hand down hard for an air platform (3 per jump)</p>
+  <p><b>Trigger +</b> punch forward = jab (4th jab knocks back) · punch up = uppercut · punch down = ground pound · <b>Trigger + grip</b> = block · <b>B/Y</b> = reset dummy</p>
+  <p>On a computer: <kbd>1</kbd> jab <kbd>2</kbd> uppercut <kbd>3</kbd> ground pound · <kbd>R</kbd> resets dummy</p>
 </div>
 
 <script type="module">
@@ -31,14 +32,15 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 // ================= TUNING =================
-// Change these numbers to adjust how attacks are detected and how hits feel.
+// Change these numbers to adjust how the game feels.
 const CONFIG = {
   // --- Size ---
-  eyeHeight: 0.75,           // meters: how high your eyes are in the game. Your arms stay full length,
-                             // so the ground ends up around your waist, like Gorilla Tag
-  dummyScale: 0.6,           // dummy size; matches the player by default
+  eyeHeight: 0.75,           // meters: the ground always stays this far below your headset, like Gorilla Tag.
+                             // Your arms stay full length, so the ground ends up around your waist
+  dummyScale: 0.6,           // dummy size (about 1.2 m tall)
+  bodyRadius: 0.2,           // meters: how wide your body is for standing on edges and bumping walls
   // --- Gorilla Tag movement ---
-  handRadius: 0.06,          // meters: size of each hand's collider (in world size)
+  handRadius: 0.06,          // meters: size of each hand's collider
   jumpMultiplier: 1.3,       // how much speed you keep when you let go of a surface
   maxJumpSpeed: 6.5,         // m/s: fastest you can launch yourself
   velocityFrames: 5,         // frames of hand motion averaged to find your launch speed
@@ -49,33 +51,25 @@ const CONFIG = {
   platformPushSpeed: 1.5,    // m/s: how hard you must push a hand downward in mid-air to spawn one
   platformLife: 0.6,         // seconds a platform lasts
   platformSize: 0.35,        // meters across
-  // --- Attacks ---
-  useWhips: false,          // fists punch instead of whipping; set true to turn whip attacks back on
-  windupAngle: 120,         // degrees: controller must point at least this far "behind" you to wind up a whip
-  fireAngle: 70,             // degrees: the whip fires once the controller snaps back within this of forward
-  snapWindow: 0.6,           // seconds allowed between leaving the wind-up and firing
-  whipTier: [6, 11, 16],     // rad/s of controller spin needed for tier 1 / 2 / 3 whips
-  stabSpeed: [3, 6, 9],      // m/s of forward punch speed needed for tier 1 / 2 / 3 jabs
-  stabPull: [0.05, 0.25, 0.45], // how far you pulled back before the punch, as a fraction of your reach
-  stabMaxSpin: 30,           // rad/s: twisting faster than this cancels a punch (fast punches twist a lot)
-  stabLookback: 0.8,         // seconds of hand history used to measure the pull-back
-  cooldown: 0.35,            // seconds before the same hand can attack again
+  // --- Light attacks (hold trigger and punch) ---
+  punchSpeed: 3.0,           // m/s: how fast your fist must move to count as an attack
+  upDownAmount: 0.6,         // 0-1: how straight up/down a punch must be to count as uppercut/ground pound
+  cooldown: 0.3,             // seconds before the same hand can attack again
   hitRange: 1.8,             // meters: how far attacks reach
   hitConeDeg: 60,            // degrees: how far off-center the dummy can be and still get hit
-  knockBase: [0, 1.8, 2.6, 4.0], // knockback speed per tier (tier 1 normals only stun)
-  knockScale: 60,            // damage % that doubles knockback
+  jabComboWindow: 1.0,       // seconds between jabs before the 4-jab combo resets
+  jabDamage: 3, jabFinisherDamage: 5, uppercutDamage: 7, poundDamage: 7,   // damage % per hit
+  jabFinisherKnock: 2.5,     // m/s: knockback from the 4th jab
+  uppercutLaunch: 5.5,       // m/s: how hard the uppercut launches upward
+  poundSpike: 9,             // m/s: how hard a ground pound slams an airborne dummy down
+  poundBounce: 2.2,          // m/s: how high the dummy pops up after being pounded into the ground
+  bounciness: 0.35,          // how much a slammed dummy bounces off the floor (0 = none)
+  knockScale: 60,            // damage % that doubles all knockback
   groundFriction: 5,         // how fast the dummy stops sliding
   gravity: 9.8,
 };
 
-const MOVES = {
-  SIDE: { normal: 'Hook',        special: 'Spinning Haymaker' },
-  UP:   { normal: 'Uppercut',    special: 'Rising Rocket' },
-  DOWN: { normal: 'Hammer Fist', special: 'Ground Pound' },
-  STAB: { normal: 'Jab',         special: 'Power Jab' },
-};
-const TIER_COLORS = ['#8a93c4', '#4fc3ff', '#ffd23f', '#ff4f6d'];
-const TIER_DAMAGE = [0, 4, 8, 14];
+const ATTACK_COLORS = { JAB: '#4fc3ff', UPPERCUT: '#ffd23f', POUND: '#ff4f6d' };
 
 // ================= SCENE =================
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -91,10 +85,9 @@ scene.background = new THREE.Color(0x7ec8ff);
 scene.fog = new THREE.Fog(0x7ec8ff, 20, 70);
 
 // The rig is the player's body: the headset and controllers live inside it, and movement moves the rig.
-// The rig sits below the game floor by `drop`, so your view is lower but your arms reach the ground.
+// Your body hangs a fixed distance (eyeHeight) below your headset, so the ground always feels the same distance away.
 const SPAWN = new THREE.Vector3(0, 0, 0);
-let drop = 0;
-let heightFrames = 0;
+let prevFeetY = 0;
 const rig = new THREE.Group();
 rig.position.copy(SPAWN);
 scene.add(rig);
@@ -109,7 +102,7 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.6);
 sun.position.set(3, 6, 2);
 scene.add(sun);
 
-// Floating Brawlhalla-style stage. Every box here is solid: hands can grab it and push off it.
+// Floating Brawlhalla-style stage. Every box here is solid: hands can grab it, bodies stand on it.
 const BOXES = [];
 function addBox(minX, minY, minZ, maxX, maxY, maxZ, color, rimColor) {
   const box = { min: new THREE.Vector3(minX, minY, minZ), max: new THREE.Vector3(maxX, maxY, maxZ) };
@@ -118,35 +111,58 @@ function addBox(minX, minY, minZ, maxX, maxY, maxZ, color, rimColor) {
   mesh.position.set((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
   scene.add(mesh);
   if (rimColor) {
-    const rim = new THREE.Mesh(new THREE.BoxGeometry(w + 0.08, 0.06, d + 0.08), new THREE.MeshStandardMaterial({ color: rimColor }));
-    rim.position.set(mesh.position.x, maxY - 0.04, mesh.position.z);
+    const rim = new THREE.Mesh(new THREE.BoxGeometry(w + 0.02, 0.06, d + 0.02), new THREE.MeshStandardMaterial({ color: rimColor }));
+    rim.position.set(mesh.position.x, maxY - 0.03, mesh.position.z);
     scene.add(rim);
   }
   BOXES.push(box);
   return box;
 }
-const STAGE = addBox(-6, -0.6, -7, 6, 0, 3, 0x6b7a99, 0xffd23f);
-addBox(-4.5, 0.9, -5.5, -2.5, 1.1, -4, 0x8a7fb0, 0xffd23f);  // floating platform, left
-addBox(2.5, 1.4, -4.5, 4.5, 1.6, -3, 0x8a7fb0, 0xffd23f);    // floating platform, right
-addBox(3.2, 0, 0.5, 4, 2.2, 1.3, 0x55607e);                    // pillar to climb
+const STAGE_DEPTH = 3.5;   // about 3 dummies tall
+addBox(-6, -STAGE_DEPTH, -7, 6, 0, 3, 0x6b7a99, 0xffd23f);     // main stage
+addBox(-4.5, 0.9, -5.5, -2.5, 1.1, -4, 0x8a7fb0, 0xffd23f);    // floating platform, left
+addBox(2.5, 1.4, -4.5, 4.5, 1.6, -3, 0x8a7fb0, 0xffd23f);      // floating platform, right
+addBox(3.2, 0, 0.5, 4, 2.2, 1.3, 0x55607e);                      // pillar to climb
 const underside = new THREE.Mesh(new THREE.ConeGeometry(5, 5, 6), new THREE.MeshStandardMaterial({ color: 0x4a5470 }));
 underside.rotation.x = Math.PI;
-underside.position.set(0, -3.1, -2);
+underside.position.set(0, -STAGE_DEPTH - 2.5, -2);
 scene.add(underside);
 
-// Top surface under a point, or null. Used for standing and for the dummy landing.
-function groundUnder(p, prevY) {
+// Highest top surface under a point (within `margin` of a box's edge), or null.
+function groundUnder(p, prevY, margin, tolerance = 0.05) {
   let best = null;
   for (const b of BOXES) {
     if (b.temp) continue;   // air platforms are only for hands
-    if (p.x > b.min.x && p.x < b.max.x && p.z > b.min.z && p.z < b.max.z && prevY >= b.max.y - 0.05 && p.y <= b.max.y) {
+    if (p.x > b.min.x - margin && p.x < b.max.x + margin && p.z > b.min.z - margin && p.z < b.max.z + margin &&
+        prevY >= b.max.y - tolerance && p.y <= b.max.y) {
       if (best === null || b.max.y > best) best = b.max.y;
     }
   }
   return best;
 }
 
-// If a sphere at p overlaps a box, returns the direction and distance to push it out.
+// Pushes a body (feet at p) sideways out of any box it has sunk into, so walls are solid.
+function pushOutOfWalls(p, radius, vel) {
+  for (const b of BOXES) {
+    if (b.temp) continue;
+    const midY = p.y + 0.3;
+    if (midY < b.min.y || p.y >= b.max.y - 0.05) continue;
+    if (p.x < b.min.x - radius || p.x > b.max.x + radius || p.z < b.min.z - radius || p.z > b.max.z + radius) continue;
+    const faces = [
+      [b.max.x + radius - p.x, 1, 0], [p.x - (b.min.x - radius), -1, 0],
+      [b.max.z + radius - p.z, 0, 1], [p.z - (b.min.z - radius), 0, -1],
+    ];
+    faces.sort((a, c) => a[0] - c[0]);
+    const [depth, nx, nz] = faces[0];
+    p.x += nx * depth; p.z += nz * depth;
+    if (vel) {
+      const into = vel.x * nx + vel.z * nz;
+      if (into < 0) { vel.x -= into * nx; vel.z -= into * nz; }
+    }
+  }
+}
+
+// If a hand sphere at p overlaps a box, returns the direction and distance to push it out.
 function penetration(p, r) {
   let bestDepth = Infinity, bestN = null, bestBox = null;
   for (const b of BOXES) {
@@ -195,6 +211,7 @@ function updatePlatforms() {
     for (const h of hands) if (h.touching && h.touchBox === box) { h.touching = false; h.lastTouch = now; }
   }
 }
+
 const spot = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.36, 32), new THREE.MeshBasicMaterial({ color: 0xffffff }));
 spot.rotation.x = -Math.PI / 2;
 spot.position.y = 0.01;
@@ -227,12 +244,16 @@ const label = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.19), new THREE.MeshB
 label.position.y = 1.95;
 dummy.add(label);
 
-const D = { home: new THREE.Vector3(0, 0, -1.8), vel: new THREE.Vector3(), damage: 0, flinch: 0, grounded: true, ringOut: 0, ringOuts: 0 };
+const D = {
+  home: new THREE.Vector3(0, 0, -1.8), vel: new THREE.Vector3(),
+  damage: 0, flinch: 0, squash: 0, grounded: true, ringOut: 0, ringOuts: 0,
+  jabCount: 0, lastJab: -10,
+};
 
 function resetDummy() {
   dummy.position.copy(D.home);
   D.vel.set(0, 0, 0);
-  D.damage = 0; D.flinch = 0; D.grounded = true; D.ringOut = 0;
+  D.damage = 0; D.flinch = 0; D.squash = 0; D.grounded = true; D.ringOut = 0; D.jabCount = 0;
   dummy.visible = true;
   drawLabel();
 }
@@ -266,7 +287,7 @@ for (let i = 0; i < 2; i++) {
   const ray = renderer.xr.getController(i);
   const grip = renderer.xr.getControllerGrip(i);
   rig.add(ray, grip);
-  const fistMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x000000 });
+  const fistMat = new THREE.MeshStandardMaterial({ color: 0xe8453c, emissive: 0x000000 });   // red boxing glove
   const fist = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.11, 0.13), fistMat);
   grip.add(fist);
   const shield = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.02, 24),
@@ -278,29 +299,26 @@ for (let i = 0; i < 2; i++) {
 
   const h = {
     ray, grip, fistMat, shield, src: null, side: 'hand',
-    prevQ: new THREE.Quaternion(), hasPrev: false, q: new THREE.Quaternion(), dq: new THREE.Quaternion(),
-    pos: new THREE.Vector3(), dir: new THREE.Vector3(), omega: new THREE.Vector3(), axisSum: new THREE.Vector3(),
-    armed: false, armedAt: 0, peakSpin: 0, cooldown: 0, flash: 0,
-    hist: [], prevFwd: null, fwdSpeed: 0, thrusting: false, peakThrust: 0,
-    liveAngle: 0, liveSpin: 0, prevA: false, prevB: false, prevBlock: false,
+    cooldown: 0, flash: 0, prevA: false, prevB: false, prevBlock: false,
+    // Hand speed, measured from your body so moving around doesn't count as punching
+    prevLocal: null, localVel: new THREE.Vector3(), shownSpeed: 0,
+    punching: false, peakSpeed: 0, peakVel: new THREE.Vector3(),
     // Gorilla Tag movement
     touching: false, anchor: new THREE.Vector3(), normal: new THREE.Vector3(), lastTouch: -1, touchBox: null,
-    prevLocalY: null, localVy: 0, lastPlatform: -1,
+    lastPlatform: -1,
   };
   ray.addEventListener('connected', e => {
     h.src = e.data;
     h.side = e.data.handedness || 'hand';
-    fistMat.color.set(0xe8453c);   // red boxing-glove color, stands out against the sky
   });
-  ray.addEventListener('disconnected', () => { h.src = null; h.hasPrev = false; });
+  ray.addEventListener('disconnected', () => { h.src = null; h.prevLocal = null; });
   hands.push(h);
 }
 
 // ================= STATE =================
 const headPos = new THREE.Vector3(), headQ = new THREE.Quaternion();
-const F = new THREE.Vector3(), R = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
-const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3(), tmpQ = new THREE.Quaternion();
-let reach = 0.65;
+const F = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3();
 let now = 0;
 let last = null;
 const history = [];
@@ -317,6 +335,7 @@ const P = rig.position;
 const bodyVel = new THREE.Vector3();
 const posHistory = [];
 const handWorld = new THREE.Vector3(), corr = new THREE.Vector3(), prevP = new THREE.Vector3();
+const feet = new THREE.Vector3();
 let wasHolding = false, playerGrounded = true;
 
 function handFree(h) {
@@ -324,16 +343,24 @@ function handFree(h) {
   return !(b[0] && b[0].pressed) && !(b[1] && b[1].pressed);
 }
 
+// Where your feet are: straight under your head, a fixed distance down
+function bodyPoint(out, rigPos) {
+  return out.set(rigPos.x + camera.position.x, rigPos.y + camera.position.y - CONFIG.eyeHeight, rigPos.z + camera.position.z);
+}
+
 function updateMovement(dt) {
   prevP.copy(P);
   updatePlatforms();
   const active = hands.filter(h => h.src && h.src.gamepad);
 
-  // How fast each hand is moving up or down, measured from your body (not the world)
+  // How fast each hand is moving, measured from your body (not the world)
   for (const h of active) {
-    const y = h.grip.position.y;
-    if (h.prevLocalY !== null && dt > 0) h.localVy = THREE.MathUtils.lerp(h.localVy, (y - h.prevLocalY) / dt, 0.5);
-    h.prevLocalY = y;
+    const p = h.grip.position;
+    if (h.prevLocal && dt > 0) {
+      tmpV.copy(p).sub(h.prevLocal).divideScalar(dt);
+      h.localVel.lerp(tmpV, 0.5);
+    }
+    h.prevLocal = (h.prevLocal || new THREE.Vector3()).copy(p);
   }
   const holding = active.some(h => h.touching);
 
@@ -366,7 +393,7 @@ function updateMovement(dt) {
   // Air jump: in mid-air, a hard downward push spawns a platform under that hand
   if (!stuck && !playerGrounded && platformsLeft > 0) {
     for (const h of active) {
-      if (!handFree(h) || h.localVy > -CONFIG.platformPushSpeed || now - h.lastPlatform < 0.25) continue;
+      if (!handFree(h) || h.localVel.y > -CONFIG.platformPushSpeed || now - h.lastPlatform < 0.25) continue;
       h.grip.getWorldPosition(handWorld);
       if (penetration(handWorld, CONFIG.handRadius)) continue;   // already touching something real
       spawnPlatform(handWorld);
@@ -394,14 +421,21 @@ function updateMovement(dt) {
     pulse(h, 0.08, 12);
   }
 
-  // Standing on the ground
-  const feet = tmpV.set(P.x, P.y + drop, P.z);
-  const g = groundUnder(feet, prevP.y + drop);
+  // Walls are solid for your body
+  bodyPoint(feet, P);
+  const before = feet.clone();
+  pushOutOfWalls(feet, CONFIG.bodyRadius, bodyVel);
+  P.x += feet.x - before.x; P.z += feet.z - before.z;
+
+  // Standing on the ground (checked under your head, with a little room at the edges)
+  bodyPoint(feet, P);
+  const g = groundUnder(feet, prevFeetY, CONFIG.bodyRadius, 0.3);
   if (g !== null) {
-    P.y = g - drop; if (bodyVel.y < 0) bodyVel.y = 0; playerGrounded = true;
+    P.y += g - feet.y; if (bodyVel.y < 0) bodyVel.y = 0; playerGrounded = true;
     platformsLeft = CONFIG.airPlatforms;   // landing refills
+  } else {
+    playerGrounded = false;
   }
-  else playerGrounded = false;
 
   // Launch speed when the last hand lets go
   const nowHolding = active.some(h => h.touching);
@@ -419,139 +453,72 @@ function updateMovement(dt) {
   wasHolding = nowHolding;
 
   // Fell off the stage
-  if (P.y < -10) {
-    P.copy(SPAWN); P.y -= drop; bodyVel.set(0, 0, 0); posHistory.length = 0;
+  if (bodyPoint(feet, P).y < -15) {
+    P.copy(SPAWN); P.x -= camera.position.x; P.z -= camera.position.z; P.y += CONFIG.eyeHeight - camera.position.y;
+    bodyVel.set(0, 0, 0); posHistory.length = 0;
     for (const h of hands) h.touching = false;
-    last = { title: 'You fell!', color: '#ff4f6d', sub: 'Back to spawn', detail: '', result: '' };
+    last = { title: 'You fell!', color: '#ff4f6d', sub: 'Back to spawn', detail: '' };
     log('You fell off. Back to spawn', '#ff4f6d');
   }
+  prevFeetY = bodyPoint(feet, P).y;
 }
 
-// ================= DETECTION =================
+// ================= ATTACK DETECTION =================
+// Hold the trigger and punch. The direction of the punch picks the attack.
 function updateHand(h, dt) {
   const gp = h.src.gamepad;
   const btn = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
   const trig = btn(0), grp = btn(1), aBtn = btn(4), bBtn = btn(5);
 
-  if (aBtn && !h.prevA) calibrate(h);
   if (bBtn && !h.prevB) { resetDummy(); log('Dummy reset', '#8a93c4'); }
   h.prevA = aBtn; h.prevB = bBtn;
 
-  h.ray.getWorldQuaternion(h.q);
-  h.grip.getWorldPosition(h.pos);
-  h.dir.set(0, 0, -1).applyQuaternion(h.q);
-  const angle = THREE.MathUtils.radToDeg(h.dir.angleTo(F));
-
-  // Spin speed (angular velocity) from the change in rotation since last frame
-  let spin = 0;
-  h.omega.set(0, 0, 0);
-  if (h.hasPrev && dt > 0) {
-    const dq = h.dq.copy(h.q).multiply(tmpQ.copy(h.prevQ).invert());
-    if (dq.w < 0) { dq.x = -dq.x; dq.y = -dq.y; dq.z = -dq.z; dq.w = -dq.w; }
-    const ang = 2 * Math.acos(Math.min(1, dq.w));
-    const s = Math.sqrt(Math.max(0, 1 - dq.w * dq.w));
-    if (s > 1e-6) {
-      spin = ang / dt;
-      h.omega.set(dq.x / s, dq.y / s, dq.z / s).multiplyScalar(spin);
-    }
-  }
-  h.prevQ.copy(h.q); h.hasPrev = true;
-  h.liveAngle = angle; h.liveSpin = spin;
+  const speed = h.localVel.length();
+  h.shownSpeed = Math.max(speed, h.shownSpeed * Math.pow(0.2, dt));   // peak hold for the panel
 
   // Block: trigger + grip
   const blocking = trig && grp;
   h.shield.visible = blocking;
   if (blocking && !h.prevBlock) {
     log(`${h.side} hand: BLOCK`, '#4fc3ff');
-    last = { title: 'Block', color: '#4fc3ff', sub: `${h.side} hand`, detail: 'Hold your fist where the attack comes from', result: '' };
+    last = { title: 'Block', color: '#4fc3ff', sub: `${h.side} hand`, detail: 'Hold your fist where the attack comes from' };
   }
   h.prevBlock = blocking;
-  if (blocking) { h.armed = false; h.thrusting = false; return; }
-
-  const held = trig || grp;
-  const special = grp;
-
-  // Whip: wind up pointing behind you, then snap back toward the front fast
-  if (CONFIG.useWhips && angle >= CONFIG.windupAngle) {
-    h.armed = true; h.armedAt = now; h.peakSpin = 0; h.axisSum.set(0, 0, 0);
-  } else if (h.armed) {
-    if (now - h.armedAt > CONFIG.snapWindow) {
-      h.armed = false;
-    } else {
-      h.peakSpin = Math.max(h.peakSpin, spin);
-      h.axisSum.addScaledVector(h.omega, dt);
-      if (angle <= CONFIG.fireAngle) {
-        h.armed = false;
-        if (held && now >= h.cooldown) {
-          if (h.peakSpin >= CONFIG.whipTier[0]) {
-            const r = h.axisSum.dot(R), u = h.axisSum.dot(UP);
-            const dir = Math.abs(u) > Math.abs(r) ? 'SIDE' : (r < 0 ? 'DOWN' : 'UP');
-            const tier = h.peakSpin >= CONFIG.whipTier[2] ? 3 : h.peakSpin >= CONFIG.whipTier[1] ? 2 : 1;
-            fireAttack(h, dir, tier, special, `Whip · ${h.peakSpin.toFixed(1)} rad/s spin`);
-          } else {
-            log(`${h.side}: whip too slow (${h.peakSpin.toFixed(1)} rad/s)`, '#8a93c4');
-          }
-        }
-      }
-    }
-  }
-
-  // Stab: straight thrust forward with little spin
-  const fwd = tmpV.copy(h.pos).sub(headPos).dot(F);
-  h.hist.push({ t: now, f: fwd });
-  while (h.hist.length && now - h.hist[0].t > CONFIG.stabLookback) h.hist.shift();
-  if (h.prevFwd !== null && dt > 0) h.fwdSpeed = THREE.MathUtils.lerp(h.fwdSpeed, (fwd - h.prevFwd) / dt, 0.5);
-  h.prevFwd = fwd;
-  h.shownSpeed = Math.max(Math.max(0, h.fwdSpeed), (h.shownSpeed || 0) * Math.pow(0.2, dt));  // peak hold for the panel
 
   const climbing = h.touching || now - h.lastTouch < 0.15;
-  if (!held || climbing || h.armed || spin >= CONFIG.stabMaxSpin || now < h.cooldown) {
-    h.thrusting = false; h.peakThrust = 0;
-  } else if (h.fwdSpeed >= CONFIG.stabSpeed[0]) {
-    h.thrusting = true;
-    h.peakThrust = Math.max(h.peakThrust, h.fwdSpeed);
-  } else if (h.thrusting && h.fwdSpeed < h.peakThrust * 0.35) {
-    let minF = Infinity;
-    for (const e of h.hist) minF = Math.min(minF, e.f);
-    const pct = Math.max(0, fwd - minF) / reach;
-    let tier = 0;
-    for (let i = 0; i < 3; i++) if (h.peakThrust >= CONFIG.stabSpeed[i] && pct >= CONFIG.stabPull[i]) tier = i + 1;
-    const detail = `Punch · ${h.peakThrust.toFixed(1)} m/s · pulled back ${Math.round(pct * 100)}% of reach`;
-    if (tier > 0) fireAttack(h, 'STAB', tier, special, detail);
-    else log(`${h.side}: punch too short (${Math.round(pct * 100)}% pull-back)`, '#8a93c4');
-    h.thrusting = false; h.peakThrust = 0;
+  if (!trig || blocking || climbing || now < h.cooldown) {
+    h.punching = false; h.peakSpeed = 0;
+    return;
+  }
+
+  if (speed >= CONFIG.punchSpeed) {
+    h.punching = true;
+    if (speed > h.peakSpeed) { h.peakSpeed = speed; h.peakVel.copy(h.localVel); }
+  } else if (h.punching && speed < h.peakSpeed * 0.4) {
+    // The punch has finished: decide which attack it was from its direction at top speed
+    const v = h.peakVel, s = h.peakSpeed;
+    const up = v.y / s;
+    const forward = (v.x * F.x + v.z * F.z) / s;
+    let kind = null;
+    if (up > CONFIG.upDownAmount) kind = 'UPPERCUT';
+    else if (up < -CONFIG.upDownAmount) kind = 'POUND';
+    else if (forward > 0.5) kind = 'JAB';
+    if (kind) fireAttack(h, kind, `${s.toFixed(1)} m/s`);
+    else log(`${h.side}: sideways swing (no attack yet)`, '#8a93c4');
+    h.punching = false; h.peakSpeed = 0;
   }
 }
 
-function calibrate(h) {
-  const fwd = tmpV.copy(h.pos).sub(headPos).dot(F);
-  reach = Math.max(0.35, fwd);
-  calibrateHeight();
-  log(`Reach set to ${reach.toFixed(2)} m`, '#ffffff');
-}
-
-// Lowers the game world under you so your eyes sit at CONFIG.eyeHeight, keeping your feet where they are
-function calibrateHeight() {
-  if (!renderer.xr.isPresenting) return false;
-  const real = camera.position.y;   // headset height above your real floor
-  if (real < 0.5) return false;
-  const next = Math.max(0, real - CONFIG.eyeHeight);
-  P.y += drop - next;
-  drop = next;
-  log(`Height set: game lowered ${drop.toFixed(2)} m`, '#ffffff');
-  return true;
-}
-renderer.xr.addEventListener('sessionstart', () => { heightFrames = 0; });
 
 // ================= ATTACKS & HITS =================
-function fireAttack(h, dir, tier, special, detail) {
+const NAMES = { JAB: 'Jab', UPPERCUT: 'Uppercut', POUND: 'Ground Pound' };
+
+function fireAttack(h, kind, detail) {
   h.cooldown = now + CONFIG.cooldown;
-  h.flash = 0.3;
-  h.fistMat.emissive.set(TIER_COLORS[tier]);
-  let move = MOVES[dir][special ? 'special' : 'normal'];
-  if (dir === 'STAB' && (h.side === 'left' || h.side === 'right')) {
-    move = `${h.side === 'left' ? 'Left' : 'Right'} ${move}`;
-  }
+  h.flash = 0.25;
+  h.fistMat.emissive.set(ATTACK_COLORS[kind]);
+  const side = h.side === 'left' ? 'Left ' : h.side === 'right' ? 'Right ' : '';
+  const name = `${side}${NAMES[kind]}`;
 
   const away = tmpV2.copy(dummy.position).sub(headPos);
   away.y = 0;
@@ -560,34 +527,58 @@ function fireAttack(h, dir, tier, special, detail) {
   const off = THREE.MathUtils.radToDeg(away.angleTo(F));
   const hit = dummy.visible && D.ringOut <= 0 && dist <= CONFIG.hitRange && off <= CONFIG.hitConeDeg;
 
-  const result = hit ? hitDummy(dir, tier, special, away) : 'Missed: dummy out of range';
-  pulse(h, hit ? 0.3 + tier * 0.2 : 0.15, hit ? 50 + tier * 30 : 25);
-  sound(tier, hit);
+  const result = hit ? hitDummy(kind, away) : 'Missed: dummy out of range';
+  pulse(h, hit ? 0.6 : 0.15, hit ? 70 : 25);
+  sound(kind === 'JAB' ? 1 : 3, hit);
 
-  last = {
-    title: move, color: TIER_COLORS[tier],
-    sub: `Tier ${tier} · ${dir} · ${h.side} hand · ${special ? 'special (grip)' : 'normal (trigger)'}`,
-    detail, result,
-  };
-  log(`${h.side}: ${move} T${tier}${hit ? '' : ' (miss)'}`, TIER_COLORS[tier]);
+  last = { title: name, color: ATTACK_COLORS[kind], sub: result, detail: `Punch speed ${detail}` };
+  log(`${name}${hit ? '' : ' (miss)'}`, ATTACK_COLORS[kind]);
 }
 
-function hitDummy(dir, tier, special, away) {
-  const dmg = TIER_DAMAGE[tier] * (special ? 1.3 : 1);
-  D.damage += dmg;
-  drawLabel();
-  if (!special && tier < 2) {
-    D.flinch = 0.35;
-    return `Hit: stun · +${Math.round(dmg)}% damage`;
+function hitDummy(kind, away) {
+  const scale = () => 1 + D.damage / CONFIG.knockScale;
+
+  if (kind === 'JAB') {
+    if (now - D.lastJab > CONFIG.jabComboWindow) D.jabCount = 0;
+    D.lastJab = now;
+    D.jabCount++;
+    if (D.jabCount < 4) {
+      D.damage += CONFIG.jabDamage; drawLabel();
+      D.flinch = 0.35;
+      return `Jab ${D.jabCount}/4: stunned · +${CONFIG.jabDamage}%`;
+    }
+    D.jabCount = 0;
+    D.damage += CONFIG.jabFinisherDamage; drawLabel();
+    const power = CONFIG.jabFinisherKnock * scale();
+    D.vel.copy(away).multiplyScalar(power);
+    D.vel.y = power * 0.35;
+    D.grounded = false; D.flinch = 0.5;
+    return `Jab 4/4: knockback ${power.toFixed(1)} m/s · +${CONFIG.jabFinisherDamage}%`;
   }
-  const power = CONFIG.knockBase[tier] * (special ? 1.2 : 1) * (1 + D.damage / CONFIG.knockScale);
-  D.vel.copy(away).multiplyScalar(power);
-  if (dir === 'UP') D.vel.y = power * 0.9;
-  else if (dir === 'DOWN') D.vel.y = D.grounded ? power * 0.15 : -power * 0.7;
-  else D.vel.y = power * 0.3;
-  D.grounded = false;
-  D.flinch = 0.5;
-  return `Hit: knockback ${power.toFixed(1)} m/s · +${Math.round(dmg)}% damage`;
+
+  if (kind === 'UPPERCUT') {
+    D.damage += CONFIG.uppercutDamage; drawLabel();
+    const power = CONFIG.uppercutLaunch * scale();
+    D.vel.copy(away).multiplyScalar(power * 0.08);   // almost straight up
+    D.vel.y = power;
+    D.grounded = false; D.flinch = 0.5; D.jabCount = 0;
+    return `Launched up ${power.toFixed(1)} m/s · +${CONFIG.uppercutDamage}%`;
+  }
+
+  // Ground pound
+  D.damage += CONFIG.poundDamage; drawLabel();
+  D.jabCount = 0; D.flinch = 0.4;
+  if (D.grounded) {
+    D.squash = 0.3;
+    D.vel.copy(away).multiplyScalar(0.3);
+    D.vel.y = CONFIG.poundBounce * scale();
+    D.grounded = false;
+    return `Pounded into the ground · +${CONFIG.poundDamage}%`;
+  }
+  const power = CONFIG.poundSpike * scale();
+  D.vel.x *= 0.3; D.vel.z *= 0.3;
+  D.vel.y = -power;
+  return `Spiked down ${power.toFixed(1)} m/s · +${CONFIG.poundDamage}%`;
 }
 
 function updateDummy(dt) {
@@ -603,9 +594,18 @@ function updateDummy(dt) {
   D.vel.y -= CONFIG.gravity * dt;
   dummy.position.addScaledVector(D.vel, dt);
   const p = dummy.position;
-  const g = groundUnder(p, prevY);
+  pushOutOfWalls(p, 0.15, D.vel);
+  const g = groundUnder(p, prevY, 0);
   if (g !== null && D.vel.y <= 0) {
-    p.y = g; D.vel.y = 0; D.grounded = true;
+    p.y = g;
+    if (D.vel.y < -3) {
+      // Slammed into the floor: squash and bounce
+      D.vel.y = -D.vel.y * CONFIG.bounciness;
+      D.squash = 0.3;
+      D.grounded = false;
+    } else {
+      D.vel.y = 0; D.grounded = true;
+    }
   } else {
     D.grounded = false;
   }
@@ -614,16 +614,18 @@ function updateDummy(dt) {
     const next = Math.max(0, speed - CONFIG.groundFriction * dt);
     if (speed > 0) { D.vel.x *= next / speed; D.vel.z *= next / speed; }
   }
-  if (p.y < -12) {
+  if (p.y < -15) {
     D.ringOut = 1.5; D.ringOuts++;
     dummy.visible = false;
-    last = { title: 'RING OUT!', color: '#ff4f6d', sub: `Ring-outs: ${D.ringOuts}`, detail: 'Dummy respawns in a moment', result: '' };
+    last = { title: 'RING OUT!', color: '#ff4f6d', sub: `Ring-outs: ${D.ringOuts}`, detail: 'Dummy respawns in a moment' };
     log('RING OUT!', '#ff4f6d');
     sound(3, true);
   }
 
   D.flinch = Math.max(0, D.flinch - dt);
+  D.squash = Math.max(0, D.squash - dt);
   pivot.rotation.x = -Math.sin(D.flinch * 30) * D.flinch * 0.6;
+  pivot.scale.set(1 + D.squash, 1 - D.squash * 1.5, 1 + D.squash);
 }
 
 // ================= FEEDBACK =================
@@ -643,15 +645,15 @@ addEventListener('pointerdown', ensureAudio);
 addEventListener('keydown', ensureAudio);
 renderer.xr.addEventListener('sessionstart', ensureAudio);
 
-function sound(tier, hit) {
+function sound(weight, hit) {
   if (!actx) return;
   const t = actx.currentTime;
   const o = actx.createOscillator(), g = actx.createGain();
   o.type = hit ? 'square' : 'sine';
-  o.frequency.setValueAtTime(hit ? 120 + tier * 70 : 520, t);
+  o.frequency.setValueAtTime(hit ? 120 + weight * 70 : 520, t);
   o.frequency.exponentialRampToValueAtTime(hit ? 50 : 300, t + 0.15);
-  g.gain.setValueAtTime(hit ? 0.15 + tier * 0.05 : 0.05, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + 0.15 + tier * 0.06);
+  g.gain.setValueAtTime(hit ? 0.15 + weight * 0.05 : 0.05, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.15 + weight * 0.06);
   o.connect(g).connect(actx.destination);
   o.start(t); o.stop(t + 0.4);
 }
@@ -668,44 +670,39 @@ function drawPanel() {
   c.fillStyle = '#10142a'; c.fillRect(0, 0, W, H);
   c.textAlign = 'left'; c.textBaseline = 'alphabetic';
   c.fillStyle = '#8a93c4'; c.font = 'bold 26px sans-serif';
-  c.fillText('GESTURE TESTER · FISTS', 40, 52);
+  c.fillText('GESTURE TESTER · FISTS · LIGHT ATTACKS', 40, 52);
 
   if (last) {
     c.fillStyle = last.color; c.font = 'bold 68px sans-serif'; c.fillText(last.title, 40, 130);
     c.fillStyle = '#e8ecff'; c.font = '30px sans-serif'; c.fillText(last.sub, 40, 178);
-    c.fillStyle = '#b9c1e6'; c.font = '26px sans-serif';
-    c.fillText(last.detail, 40, 218);
-    c.fillText(last.result, 40, 254);
+    c.fillStyle = '#b9c1e6'; c.font = '26px sans-serif'; c.fillText(last.detail, 40, 218);
   } else {
     c.fillStyle = '#e8ecff'; c.font = '36px sans-serif';
-    c.fillText('Hold trigger and punch the dummy', 40, 130);
+    c.fillText('Hold trigger: punch forward, up or down', 40, 130);
   }
 
   // Live meters per hand
-  let y = 300;
-  c.font = 'bold 22px sans-serif';
-  const maxBar = CONFIG.stabSpeed[2] * 1.3;
+  let y = 270;
+  const maxBar = CONFIG.punchSpeed * 3;
   hands.forEach((h, i) => {
-    c.fillStyle = '#8a93c4';
+    c.fillStyle = '#8a93c4'; c.font = 'bold 22px sans-serif';
     if (!h.src || !h.src.gamepad) {
       c.fillText(`CONTROLLER ${i + 1}: not detected`, 40, y + 20);
       y += 40;
       return;
     }
     c.fillText(h.side.toUpperCase(), 40, y + 20);
-    bar(c, 160, y, 360, 24, h.shownSpeed / maxBar, CONFIG.stabSpeed.map(v => v / maxBar), h.thrusting ? '#ffd23f' : '#4fc3ff');
-    bar(c, 560, y, 300, 24, h.liveSpin / 40, [CONFIG.stabMaxSpin / 40], '#ff4f6d');
-    c.fillStyle = '#e8ecff'; c.font = '20px sans-serif';
+    bar(c, 160, y, 500, 24, h.shownSpeed / maxBar, [CONFIG.punchSpeed / maxBar], h.punching ? '#ffd23f' : '#4fc3ff');
     const btns = h.src.gamepad.buttons;
-    const state = h.touching ? ' · GRIPPING' : (btns[0] && btns[0].pressed) ? ' · trigger' : (btns[1] && btns[1].pressed) ? ' · grip' : '';
-    c.fillText(`${h.shownSpeed.toFixed(1)} m/s punch speed${state}`, 160, y + 50);
-    c.fillText(`${h.liveSpin.toFixed(1)} rad/s twist`, 560, y + 50);
-    c.font = 'bold 22px sans-serif';
+    const state = h.touching ? 'GRIPPING' : (btns[0] && btns[0].pressed) ? 'trigger' : (btns[1] && btns[1].pressed) ? 'grip' : '';
+    c.fillStyle = '#e8ecff'; c.font = '20px sans-serif';
+    c.fillText(`${h.shownSpeed.toFixed(1)} m/s fist speed`, 160, y + 50);
+    c.fillText(state, 700, y + 20);
     y += 76;
   });
 
   // History
-  y = Math.max(y + 10, 470);
+  y = Math.max(y + 10, 440);
   c.font = '24px sans-serif';
   for (const e of history) {
     if (y > H - 70) break;
@@ -714,23 +711,17 @@ function drawPanel() {
   }
 
   c.fillStyle = '#8a93c4'; c.font = '22px sans-serif';
-  c.fillText(`Dummy: ${Math.round(D.damage)}%  ·  Ring-outs: ${D.ringOuts}  ·  Reach: ${reach.toFixed(2)} m  ·  Lowered: ${drop.toFixed(2)} m  ·  Air jumps: ${platformsLeft}/${CONFIG.airPlatforms}`, 40, H - 28);
+  c.fillText(`Dummy: ${Math.round(D.damage)}%  ·  Ring-outs: ${D.ringOuts}  ·  Jab combo: ${D.jabCount}/4  ·  Air jumps: ${platformsLeft}/${CONFIG.airPlatforms}`, 40, H - 28);
   panelTex.needsUpdate = true;
 }
 
 // ================= COMPUTER TESTING =================
-const keyHands = {
-  '1': { side: 'left', src: null, fistMat: new THREE.MeshStandardMaterial(), cooldown: 0, flash: 0 },
-  '2': { side: 'right', src: null, fistMat: new THREE.MeshStandardMaterial(), cooldown: 0, flash: 0 },
-};
-let keyTier = 2;
+const keyHand = { side: 'keyboard', src: null, fistMat: new THREE.MeshStandardMaterial(), cooldown: 0, flash: 0 };
 addEventListener('keydown', e => {
-  const keyHand = keyHands[e.code ? e.code.replace('Digit', '') : e.key];
-  if (keyHand) {
-    fireAttack(keyHand, 'STAB', keyTier, e.shiftKey, 'Keyboard test');
-  } else if (e.key.toLowerCase() === 't') {
-    keyTier = keyTier % 3 + 1;
-    log(`Keyboard tier set to ${keyTier}`, TIER_COLORS[keyTier]);
+  const kinds = { Digit1: 'JAB', Digit2: 'UPPERCUT', Digit3: 'POUND' };
+  if (kinds[e.code]) {
+    keyHand.cooldown = 0;
+    fireAttack(keyHand, kinds[e.code], 'keyboard test');
   } else if (e.key.toLowerCase() === 'r') {
     resetDummy(); log('Dummy reset', '#8a93c4');
   }
@@ -751,10 +742,6 @@ renderer.setAnimationLoop(() => {
   now += dt;
 
   for (const h of hands) if (!h.src) h.touching = false;
-  // Set your game height automatically about half a second after entering VR
-  if (renderer.xr.isPresenting && heightFrames >= 0 && ++heightFrames > 45) {
-    if (calibrateHeight()) heightFrames = -1;
-  }
   updateMovement(dt);
 
   // In VR, three.js copies the headset pose onto this camera, so this works in both modes
@@ -764,7 +751,6 @@ renderer.setAnimationLoop(() => {
   F.y = 0;
   if (F.lengthSq() < 1e-4) F.set(0, 0, -1);
   F.normalize();
-  R.crossVectors(F, UP).normalize();
 
   for (const h of hands) {
     if (h.src && h.src.gamepad) updateHand(h, dt);
