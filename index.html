@@ -22,7 +22,7 @@
 <div id="info">
   <h1>VR Brawler: Gesture Tester</h1>
   <p>Open this page in the Meta Quest Browser and press <b>Enter VR</b>. Wear your wrist straps and clear your space.</p>
-  <p><b>No buttons</b>: grab the ground or walls and push to move, like Gorilla Tag · <b>Trigger + punch</b> = jab (either hand) · <b>Grip + punch</b> = power jab · <b>Trigger + grip</b> = block · <b>A/X</b> with arm straight out = set reach · <b>B/Y</b> = reset dummy</p>
+  <p><b>No buttons</b>: grab the ground or walls and push to move, like Gorilla Tag · in mid-air, push a hand down hard for an air platform (3 per jump) · <b>Trigger + punch</b> = jab (either hand) · <b>Grip + punch</b> = power jab · <b>Trigger + grip</b> = block · <b>A/X</b> with arm straight out = set reach · <b>B/Y</b> = reset dummy</p>
   <p>On a computer: <kbd>1</kbd> left jab <kbd>2</kbd> right jab · hold <kbd>Shift</kbd> for power jab · <kbd>T</kbd> changes tier · <kbd>R</kbd> resets dummy</p>
 </div>
 
@@ -34,7 +34,7 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 // Change these numbers to adjust how attacks are detected and how hits feel.
 const CONFIG = {
   // --- Size ---
-  eyeHeight: 1.0,            // meters: how high your eyes are in the game. Your arms stay full length,
+  eyeHeight: 0.75,           // meters: how high your eyes are in the game. Your arms stay full length,
                              // so the ground ends up around your waist, like Gorilla Tag
   dummyScale: 0.6,           // dummy size; matches the player by default
   // --- Gorilla Tag movement ---
@@ -44,15 +44,20 @@ const CONFIG = {
   velocityFrames: 5,         // frames of hand motion averaged to find your launch speed
   releaseDistance: 0.003,    // meters: how far your hand must pull away from a surface to let go
   playerGroundFriction: 8,   // how fast you stop sliding when standing
+  // --- Air jump platforms ---
+  airPlatforms: 3,           // platforms per jump; refill when you land or grab a ledge
+  platformPushSpeed: 1.5,    // m/s: how hard you must push a hand downward in mid-air to spawn one
+  platformLife: 0.6,         // seconds a platform lasts
+  platformSize: 0.35,        // meters across
   // --- Attacks ---
   useWhips: false,          // fists punch instead of whipping; set true to turn whip attacks back on
   windupAngle: 120,         // degrees: controller must point at least this far "behind" you to wind up a whip
   fireAngle: 70,             // degrees: the whip fires once the controller snaps back within this of forward
   snapWindow: 0.6,           // seconds allowed between leaving the wind-up and firing
   whipTier: [6, 11, 16],     // rad/s of controller spin needed for tier 1 / 2 / 3 whips
-  stabSpeed: [1.4, 2.2, 3.0],// m/s of forward punch speed needed for tier 1 / 2 / 3 jabs
-  stabPull: [0.1, 0.3, 0.5], // how far you pulled back before the punch, as a fraction of your reach
-  stabMaxSpin: 10,           // rad/s: twisting faster than this means it's not a punch
+  stabSpeed: [3, 6, 9],      // m/s of forward punch speed needed for tier 1 / 2 / 3 jabs
+  stabPull: [0.05, 0.25, 0.45], // how far you pulled back before the punch, as a fraction of your reach
+  stabMaxSpin: 30,           // rad/s: twisting faster than this cancels a punch (fast punches twist a lot)
   stabLookback: 0.8,         // seconds of hand history used to measure the pull-back
   cooldown: 0.35,            // seconds before the same hand can attack again
   hitRange: 1.8,             // meters: how far attacks reach
@@ -133,6 +138,7 @@ scene.add(underside);
 function groundUnder(p, prevY) {
   let best = null;
   for (const b of BOXES) {
+    if (b.temp) continue;   // air platforms are only for hands
     if (p.x > b.min.x && p.x < b.max.x && p.z > b.min.z && p.z < b.max.z && prevY >= b.max.y - 0.05 && p.y <= b.max.y) {
       if (best === null || b.max.y > best) best = b.max.y;
     }
@@ -142,7 +148,7 @@ function groundUnder(p, prevY) {
 
 // If a sphere at p overlaps a box, returns the direction and distance to push it out.
 function penetration(p, r) {
-  let bestDepth = Infinity, bestN = null;
+  let bestDepth = Infinity, bestN = null, bestBox = null;
   for (const b of BOXES) {
     if (p.x < b.min.x - r || p.x > b.max.x + r || p.y < b.min.y - r || p.y > b.max.y + r || p.z < b.min.z - r || p.z > b.max.z + r) continue;
     const faces = [
@@ -151,10 +157,43 @@ function penetration(p, r) {
       [b.max.z + r - p.z, 0, 0, 1], [p.z - (b.min.z - r), 0, 0, -1],
     ];
     for (const [depth, x, y, z] of faces) {
-      if (depth < bestDepth) { bestDepth = depth; bestN = new THREE.Vector3(x, y, z); }
+      if (depth < bestDepth) { bestDepth = depth; bestN = new THREE.Vector3(x, y, z); bestBox = b; }
     }
   }
-  return bestN ? { n: bestN, depth: bestDepth } : null;
+  return bestN ? { n: bestN, depth: bestDepth, box: bestBox } : null;
+}
+
+// Air jump platforms: short-lived boxes that appear under your hand
+const platformMat = new THREE.MeshStandardMaterial({ color: 0x7ff0ff, emissive: 0x2aa8c0, transparent: true, opacity: 0.8 });
+const airPlatforms = [];
+let platformsLeft = CONFIG.airPlatforms;
+
+function spawnPlatform(at) {
+  const half = CONFIG.platformSize / 2, top = at.y - CONFIG.handRadius + 0.005;
+  const box = {
+    min: new THREE.Vector3(at.x - half, top - 0.06, at.z - half),
+    max: new THREE.Vector3(at.x + half, top, at.z + half),
+    temp: true, born: now,
+  };
+  box.mesh = new THREE.Mesh(new THREE.BoxGeometry(CONFIG.platformSize, 0.06, CONFIG.platformSize), platformMat.clone());
+  box.mesh.position.set(at.x, top - 0.03, at.z);
+  scene.add(box.mesh);
+  BOXES.push(box);
+  airPlatforms.push(box);
+}
+
+function updatePlatforms() {
+  for (let i = airPlatforms.length - 1; i >= 0; i--) {
+    const box = airPlatforms[i];
+    const age = now - box.born;
+    box.mesh.material.opacity = 0.8 * (1 - age / CONFIG.platformLife);
+    if (age < CONFIG.platformLife) continue;
+    scene.remove(box.mesh);
+    box.mesh.geometry.dispose(); box.mesh.material.dispose();
+    BOXES.splice(BOXES.indexOf(box), 1);
+    airPlatforms.splice(i, 1);
+    for (const h of hands) if (h.touching && h.touchBox === box) { h.touching = false; h.lastTouch = now; }
+  }
 }
 const spot = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.36, 32), new THREE.MeshBasicMaterial({ color: 0xffffff }));
 spot.rotation.x = -Math.PI / 2;
@@ -245,7 +284,8 @@ for (let i = 0; i < 2; i++) {
     hist: [], prevFwd: null, fwdSpeed: 0, thrusting: false, peakThrust: 0,
     liveAngle: 0, liveSpin: 0, prevA: false, prevB: false, prevBlock: false,
     // Gorilla Tag movement
-    touching: false, anchor: new THREE.Vector3(), normal: new THREE.Vector3(), lastTouch: -1, free: false,
+    touching: false, anchor: new THREE.Vector3(), normal: new THREE.Vector3(), lastTouch: -1, touchBox: null,
+    prevLocalY: null, localVy: 0, lastPlatform: -1,
   };
   ray.addEventListener('connected', e => {
     h.src = e.data;
@@ -286,7 +326,15 @@ function handFree(h) {
 
 function updateMovement(dt) {
   prevP.copy(P);
+  updatePlatforms();
   const active = hands.filter(h => h.src && h.src.gamepad);
+
+  // How fast each hand is moving up or down, measured from your body (not the world)
+  for (const h of active) {
+    const y = h.grip.position.y;
+    if (h.prevLocalY !== null && dt > 0) h.localVy = THREE.MathUtils.lerp(h.localVy, (y - h.prevLocalY) / dt, 0.5);
+    h.prevLocalY = y;
+  }
   const holding = active.some(h => h.touching);
 
   // Falling (and sliding to a stop on the ground) when no hand is holding a surface
@@ -315,6 +363,22 @@ function updateMovement(dt) {
   }
   if (stuck) P.addScaledVector(corr, 1 / stuck);
 
+  // Air jump: in mid-air, a hard downward push spawns a platform under that hand
+  if (!stuck && !playerGrounded && platformsLeft > 0) {
+    for (const h of active) {
+      if (!handFree(h) || h.localVy > -CONFIG.platformPushSpeed || now - h.lastPlatform < 0.25) continue;
+      h.grip.getWorldPosition(handWorld);
+      if (penetration(handWorld, CONFIG.handRadius)) continue;   // already touching something real
+      spawnPlatform(handWorld);
+      platformsLeft--;
+      h.lastPlatform = now;
+      pulse(h, 0.4, 30);
+      sound(1, false);
+      log(`Air platform (${platformsLeft} left)`, '#7ff0ff');
+      break;
+    }
+  }
+
   // Hands touching a surface for the first time
   for (const h of active) {
     if (h.touching || !handFree(h)) continue;
@@ -325,13 +389,18 @@ function updateMovement(dt) {
     h.anchor.copy(handWorld).addScaledVector(hit.n, hit.depth);
     h.normal.copy(hit.n);
     h.touching = true; h.lastTouch = now;
+    h.touchBox = hit.box;
+    if (!hit.box.temp) platformsLeft = CONFIG.airPlatforms;   // grabbing a ledge or wall refills
     pulse(h, 0.08, 12);
   }
 
   // Standing on the ground
   const feet = tmpV.set(P.x, P.y + drop, P.z);
   const g = groundUnder(feet, prevP.y + drop);
-  if (g !== null) { P.y = g - drop; if (bodyVel.y < 0) bodyVel.y = 0; playerGrounded = true; }
+  if (g !== null) {
+    P.y = g - drop; if (bodyVel.y < 0) bodyVel.y = 0; playerGrounded = true;
+    platformsLeft = CONFIG.airPlatforms;   // landing refills
+  }
   else playerGrounded = false;
 
   // Launch speed when the last hand lets go
@@ -433,6 +502,7 @@ function updateHand(h, dt) {
   while (h.hist.length && now - h.hist[0].t > CONFIG.stabLookback) h.hist.shift();
   if (h.prevFwd !== null && dt > 0) h.fwdSpeed = THREE.MathUtils.lerp(h.fwdSpeed, (fwd - h.prevFwd) / dt, 0.5);
   h.prevFwd = fwd;
+  h.shownSpeed = Math.max(Math.max(0, h.fwdSpeed), (h.shownSpeed || 0) * Math.pow(0.2, dt));  // peak hold for the panel
 
   const climbing = h.touching || now - h.lastTouch < 0.15;
   if (!held || climbing || h.armed || spin >= CONFIG.stabMaxSpin || now < h.cooldown) {
@@ -462,13 +532,14 @@ function calibrate(h) {
 
 // Lowers the game world under you so your eyes sit at CONFIG.eyeHeight, keeping your feet where they are
 function calibrateHeight() {
-  if (!renderer.xr.isPresenting) return;
+  if (!renderer.xr.isPresenting) return false;
   const real = camera.position.y;   // headset height above your real floor
-  if (real < 0.5) return;
+  if (real < 0.5) return false;
   const next = Math.max(0, real - CONFIG.eyeHeight);
   P.y += drop - next;
   drop = next;
-  log(`Height set: eyes ${CONFIG.eyeHeight.toFixed(1)} m up in game`, '#ffffff');
+  log(`Height set: game lowered ${drop.toFixed(2)} m`, '#ffffff');
+  return true;
 }
 renderer.xr.addEventListener('sessionstart', () => { heightFrames = 0; });
 
@@ -613,19 +684,25 @@ function drawPanel() {
   // Live meters per hand
   let y = 300;
   c.font = 'bold 22px sans-serif';
-  for (const h of hands) {
-    if (!h.src) continue;
+  const maxBar = CONFIG.stabSpeed[2] * 1.3;
+  hands.forEach((h, i) => {
     c.fillStyle = '#8a93c4';
+    if (!h.src || !h.src.gamepad) {
+      c.fillText(`CONTROLLER ${i + 1}: not detected`, 40, y + 20);
+      y += 40;
+      return;
+    }
     c.fillText(h.side.toUpperCase(), 40, y + 20);
-    h.shownSpeed = Math.max(Math.max(0, h.fwdSpeed), (h.shownSpeed || 0) * 0.85);
-    bar(c, 160, y, 360, 24, h.shownSpeed / 4, CONFIG.stabSpeed.map(v => v / 4), h.thrusting ? '#ffd23f' : '#4fc3ff');
-    bar(c, 560, y, 300, 24, h.liveSpin / 25, [CONFIG.stabMaxSpin / 25], '#ff4f6d');
+    bar(c, 160, y, 360, 24, h.shownSpeed / maxBar, CONFIG.stabSpeed.map(v => v / maxBar), h.thrusting ? '#ffd23f' : '#4fc3ff');
+    bar(c, 560, y, 300, 24, h.liveSpin / 40, [CONFIG.stabMaxSpin / 40], '#ff4f6d');
     c.fillStyle = '#e8ecff'; c.font = '20px sans-serif';
-    c.fillText(`${h.shownSpeed.toFixed(1)} m/s punch speed`, 160, y + 50);
+    const btns = h.src.gamepad.buttons;
+    const state = h.touching ? ' · GRIPPING' : (btns[0] && btns[0].pressed) ? ' · trigger' : (btns[1] && btns[1].pressed) ? ' · grip' : '';
+    c.fillText(`${h.shownSpeed.toFixed(1)} m/s punch speed${state}`, 160, y + 50);
     c.fillText(`${h.liveSpin.toFixed(1)} rad/s twist`, 560, y + 50);
     c.font = 'bold 22px sans-serif';
     y += 76;
-  }
+  });
 
   // History
   y = Math.max(y + 10, 470);
@@ -637,7 +714,7 @@ function drawPanel() {
   }
 
   c.fillStyle = '#8a93c4'; c.font = '22px sans-serif';
-  c.fillText(`Dummy: ${Math.round(D.damage)}%  ·  Ring-outs: ${D.ringOuts}  ·  Reach: ${reach.toFixed(2)} m`, 40, H - 28);
+  c.fillText(`Dummy: ${Math.round(D.damage)}%  ·  Ring-outs: ${D.ringOuts}  ·  Reach: ${reach.toFixed(2)} m  ·  Lowered: ${drop.toFixed(2)} m  ·  Air jumps: ${platformsLeft}/${CONFIG.airPlatforms}`, 40, H - 28);
   panelTex.needsUpdate = true;
 }
 
@@ -676,8 +753,7 @@ renderer.setAnimationLoop(() => {
   for (const h of hands) if (!h.src) h.touching = false;
   // Set your game height automatically about half a second after entering VR
   if (renderer.xr.isPresenting && heightFrames >= 0 && ++heightFrames > 45) {
-    calibrateHeight();
-    heightFrames = -1;
+    if (calibrateHeight()) heightFrames = -1;
   }
   updateMovement(dt);
 
