@@ -24,7 +24,8 @@
   <p>Open this page in the Meta Quest Browser and press <b>Enter VR</b>. Wear your wrist straps and clear your space.</p>
   <p><b>No buttons</b>: grab the ground or walls and push to move, like Gorilla Tag · in mid-air, push a hand down hard for an air platform (3 per jump)</p>
   <p><b>Trigger +</b> punch forward = jab (4th jab knocks back) · punch up = uppercut · punch down = ground pound · <b>Trigger + grip</b> = block · <b>B/Y</b> = reset dummy</p>
-  <p>On a computer: <kbd>1</kbd> jab <kbd>2</kbd> uppercut <kbd>3</kbd> ground pound · <kbd>R</kbd> resets dummy</p>
+  <p><b>Grip +</b> punch forward = special jab (its momentum carries you forward a little) · punch up = special uppercut · punch down = special slam (hops you up) · jab while moving fast = running jab (1 s stun)</p>
+  <p>On a computer: <kbd>1</kbd> jab <kbd>2</kbd> uppercut <kbd>3</kbd> ground pound <kbd>4</kbd> running jab <kbd>5</kbd> special jab <kbd>6</kbd> special uppercut <kbd>7</kbd> special slam · <kbd>R</kbd> resets dummy</p>
 </div>
 
 <script type="module">
@@ -65,12 +66,32 @@ const CONFIG = {
   poundSpike: 9,             // m/s: how hard a ground pound slams an airborne dummy down
   poundBounce: 2.2,          // m/s: how high the dummy pops up after being pounded into the ground
   bounciness: 0.35,          // how much a slammed dummy bounces off the floor (0 = none)
-  knockScale: 60,            // damage % that doubles all knockback
+  jabStun: 0.5,              // seconds a light jab stuns the dummy
+  // --- Running jab (a light jab while you're moving fast) ---
+  runningJabSpeed: 2.0,      // m/s: how fast you must be moving for a jab to become a running jab
+  runningJabStun: 1.0,       // seconds it stuns the dummy
+  runningJabDamage: 4,
+  // --- Special attacks (hold grip and punch) ---
+  specialCooldown: 0.6,      // seconds before the same hand can do another special
+  sJabCarry: 1.5,            // m/s: the punch's momentum carries you a little in the direction you punched
+  sJabCarryTime: 0.12,       // seconds that momentum lasts before you slow down normally
+  sJabKnock: 4.5,            // m/s: special jab knockback
+  sUppercutLaunch: 4.5,      // m/s: special uppercut launch (you stay put)
+  sSlamKnock: 3.5,           // m/s: special slam knockback on a dummy on the ground
+  sSlamSpike: 12,            // m/s: special slam on an airborne dummy
+  sSlamHop: 3,               // m/s: how much the special slam pops you up
+  sJabDamage: 9, sUppercutDamage: 10, sSlamDamage: 10,
+  knockScale: 60,           // damage % that doubles all knockback
   groundFriction: 5,         // how fast the dummy stops sliding
   gravity: 9.8,
 };
 
-const ATTACK_COLORS = { JAB: '#4fc3ff', UPPERCUT: '#ffd23f', POUND: '#ff4f6d' };
+const SPECIAL_COLOR = '#ff5a1f';   // red-orange trail and flash for grip attacks
+const LIGHT_COLOR = '#ffd23f';     // yellow trail for trigger attacks
+const ATTACK_COLORS = {
+  JAB: '#4fc3ff', UPPERCUT: '#ffd23f', POUND: '#ff4f6d', RUNJAB: '#b07cff',
+  SJAB: SPECIAL_COLOR, SUPPERCUT: SPECIAL_COLOR, SSLAM: SPECIAL_COLOR,
+};
 
 // ================= SCENE =================
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -143,11 +164,12 @@ function groundUnder(p, prevY, margin, tolerance = 0.05) {
 }
 
 // Pushes a body (feet at p) sideways out of any box it has sunk into, so walls are solid.
-function pushOutOfWalls(p, radius, vel) {
+// A body that was above a box's top last frame (prevY) is landing on it, not hitting its wall, so it's skipped.
+function pushOutOfWalls(p, radius, vel, prevY, tolerance) {
   for (const b of BOXES) {
     if (b.temp) continue;
     const midY = p.y + 0.3;
-    if (midY < b.min.y || p.y >= b.max.y - 0.05) continue;
+    if (midY < b.min.y || p.y >= b.max.y - 0.05 || prevY >= b.max.y - tolerance) continue;
     if (p.x < b.min.x - radius || p.x > b.max.x + radius || p.z < b.min.z - radius || p.z > b.max.z + radius) continue;
     const faces = [
       [b.max.x + radius - p.x, 1, 0], [p.x - (b.min.x - radius), -1, 0],
@@ -260,13 +282,13 @@ dummy.add(label);
 const D = {
   home: new THREE.Vector3(0, 0, -1.8), vel: new THREE.Vector3(),
   damage: 0, flinch: 0, squash: 0, grounded: true, ringOut: 0, ringOuts: 0,
-  jabCount: 0, lastJab: -10,
+  jabCount: 0, lastJab: -10, stun: 0,
 };
 
 function resetDummy() {
   dummy.position.copy(D.home);
   D.vel.set(0, 0, 0);
-  D.damage = 0; D.flinch = 0; D.squash = 0; D.grounded = true; D.ringOut = 0; D.jabCount = 0;
+  D.damage = 0; D.flinch = 0; D.squash = 0; D.grounded = true; D.ringOut = 0; D.jabCount = 0; D.stun = 0;
   dummy.visible = true;
   drawLabel();
 }
@@ -350,6 +372,17 @@ const posHistory = [];
 const handWorld = new THREE.Vector3(), corr = new THREE.Vector3(), prevP = new THREE.Vector3();
 const feet = new THREE.Vector3();
 let wasHolding = false, playerGrounded = true;
+let dashUntil = 0;       // while dashing, the ground doesn't slow you and hands don't grab
+let runSpeed = 0;        // how fast you've been moving lately (for running jabs)
+
+// Throws your body with a set velocity (special jab dash, special slam hop)
+function launchPlayer(vel, duration) {
+  for (const h of hands) { if (h.touching) { h.touching = false; h.lastTouch = now; } }
+  wasHolding = false;
+  bodyVel.copy(vel);
+  playerGrounded = false;
+  dashUntil = now + duration;
+}
 
 function handFree(h) {
   const b = h.src.gamepad.buttons;
@@ -380,7 +413,7 @@ function updateMovement(dt) {
   // Falling (and sliding to a stop on the ground) when no hand is holding a surface
   if (!holding) {
     bodyVel.y -= CONFIG.gravity * dt;
-    if (playerGrounded) {
+    if (playerGrounded && now > dashUntil) {
       const k = Math.max(0, 1 - CONFIG.playerGroundFriction * dt);
       bodyVel.x *= k; bodyVel.z *= k;
     }
@@ -421,7 +454,7 @@ function updateMovement(dt) {
 
   // Hands touching a surface for the first time
   for (const h of active) {
-    if (h.touching || !handFree(h)) continue;
+    if (h.touching || !handFree(h) || now < dashUntil) continue;
     h.grip.getWorldPosition(handWorld);
     const hit = penetration(handWorld, CONFIG.handRadius);
     if (!hit) continue;
@@ -437,7 +470,7 @@ function updateMovement(dt) {
   // Walls are solid for your body
   bodyPoint(feet, P);
   const before = feet.clone();
-  pushOutOfWalls(feet, CONFIG.bodyRadius, bodyVel);
+  pushOutOfWalls(feet, CONFIG.bodyRadius, bodyVel, prevFeetY, 0.3);
   P.x += feet.x - before.x; P.z += feet.z - before.z;
 
   // Standing on the ground (checked under your head, with a little room at the edges)
@@ -454,6 +487,11 @@ function updateMovement(dt) {
   const nowHolding = active.some(h => h.touching);
   posHistory.push({ t: now, p: P.clone() });
   while (posHistory.length > CONFIG.velocityFrames + 1) posHistory.shift();
+  if (posHistory.length > 1) {
+    const a = posHistory[0], b = posHistory[posHistory.length - 1];
+    const speed = b.t > a.t ? Math.hypot(b.p.x - a.p.x, b.p.z - a.p.z) / (b.t - a.t) : 0;
+    runSpeed = Math.max(speed, runSpeed * Math.pow(0.1, dt));   // remembers your speed for a moment
+  }
   if (nowHolding) {
     bodyVel.set(0, 0, 0);
   } else if (wasHolding && posHistory.length > 1) {
@@ -477,7 +515,7 @@ function updateMovement(dt) {
 }
 
 // ================= ATTACK DETECTION =================
-// Hold the trigger and punch. The direction of the punch picks the attack.
+// Hold the trigger (light) or grip (special) and punch. The direction of the punch picks the attack.
 function updateHand(h, dt) {
   const gp = h.src.gamepad;
   const btn = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
@@ -498,11 +536,15 @@ function updateHand(h, dt) {
   }
   h.prevBlock = blocking;
 
+  const special = grp && !trig;
   const climbing = h.touching || now - h.lastTouch < 0.15;
-  if (!trig || blocking || climbing || now < h.cooldown) {
+  if (!(trig || grp) || blocking || climbing || now < h.cooldown) {
     h.punching = false; h.peakSpeed = 0;
     return;
   }
+
+  // Trail while swinging: yellow for light attacks, red-orange for specials
+  if (speed >= CONFIG.punchSpeed * 0.6) spawnTrail(h, special ? SPECIAL_COLOR : LIGHT_COLOR);
 
   if (speed >= CONFIG.punchSpeed) {
     h.punching = true;
@@ -516,7 +558,9 @@ function updateHand(h, dt) {
     if (up > CONFIG.upDownAmount) kind = 'UPPERCUT';
     else if (up < -CONFIG.upDownAmount) kind = 'POUND';
     else if (forward > 0.5) kind = 'JAB';
-    if (kind) fireAttack(h, kind, `${s.toFixed(1)} m/s`);
+    if (kind && special) kind = { JAB: 'SJAB', UPPERCUT: 'SUPPERCUT', POUND: 'SSLAM' }[kind];
+    else if (kind === 'JAB' && runSpeed >= CONFIG.runningJabSpeed) kind = 'RUNJAB';
+    if (kind) fireAttack(h, kind, `${s.toFixed(1)} m/s`, tmpV.copy(v).divideScalar(s));
     else log(`${h.side}: sideways swing (no attack yet)`, '#8a93c4');
     h.punching = false; h.peakSpeed = 0;
   }
@@ -524,12 +568,20 @@ function updateHand(h, dt) {
 
 
 // ================= ATTACKS & HITS =================
-const NAMES = { JAB: 'Jab', UPPERCUT: 'Uppercut', POUND: 'Ground Pound' };
+const NAMES = {
+  JAB: 'Jab', UPPERCUT: 'Uppercut', POUND: 'Ground Pound', RUNJAB: 'Running Jab',
+  SJAB: 'Special Jab', SUPPERCUT: 'Special Uppercut', SSLAM: 'Special Slam',
+};
+const SPECIALS = new Set(['SJAB', 'SUPPERCUT', 'SSLAM']);
 
-function fireAttack(h, kind, detail) {
-  h.cooldown = now + CONFIG.cooldown;
+// `dir` is the direction the fist was moving at top speed
+function fireAttack(h, kind, detail, dir) {
+  const special = SPECIALS.has(kind);
+  h.cooldown = now + (special ? CONFIG.specialCooldown : CONFIG.cooldown);
   h.flash = 0.25;
   h.fistMat.emissive.set(ATTACK_COLORS[kind]);
+  h.trailUntil = now + 0.15;
+  h.trailColor = special ? SPECIAL_COLOR : LIGHT_COLOR;
   const side = h.side === 'left' ? 'Left ' : h.side === 'right' ? 'Right ' : '';
   const name = `${side}${NAMES[kind]}`;
 
@@ -540,9 +592,13 @@ function fireAttack(h, kind, detail) {
   const off = THREE.MathUtils.radToDeg(away.angleTo(F));
   const hit = dummy.visible && D.ringOut <= 0 && dist <= CONFIG.hitRange && off <= CONFIG.hitConeDeg;
 
+  // Specials that move you
+  if (kind === 'SJAB') launchPlayer(tmpV.copy(dir).multiplyScalar(CONFIG.sJabCarry), CONFIG.sJabCarryTime);
+  if (kind === 'SSLAM') launchPlayer(tmpV.set(bodyVel.x, CONFIG.sSlamHop, bodyVel.z), 0.1);
+
   const result = hit ? hitDummy(kind, away) : 'Missed: dummy out of range';
-  pulse(h, hit ? 0.6 : 0.15, hit ? 70 : 25);
-  sound(kind === 'JAB' ? 1 : 3, hit);
+  pulse(h, hit ? (special ? 0.9 : 0.6) : 0.15, hit ? (special ? 110 : 70) : 25);
+  sound(kind === 'JAB' || kind === 'RUNJAB' ? 1 : 3, hit);
 
   last = { title: name, color: ATTACK_COLORS[kind], sub: result, detail: `Punch speed ${detail}` };
   log(`${name}${hit ? '' : ' (miss)'}`, ATTACK_COLORS[kind]);
@@ -551,13 +607,54 @@ function fireAttack(h, kind, detail) {
 function hitDummy(kind, away) {
   const scale = () => 1 + D.damage / CONFIG.knockScale;
 
+  if (kind === 'RUNJAB') {
+    D.damage += CONFIG.runningJabDamage; drawLabel();
+    D.flinch = 0.4; D.stun = CONFIG.runningJabStun; D.jabCount = 0;
+    return `Stunned for ${CONFIG.runningJabStun} s · +${CONFIG.runningJabDamage}%`;
+  }
+
+  if (kind === 'SJAB') {
+    D.damage += CONFIG.sJabDamage; drawLabel();
+    const power = CONFIG.sJabKnock * scale();
+    D.vel.copy(away).multiplyScalar(power);
+    D.vel.y = power * 0.3;
+    D.grounded = false; D.flinch = 0.5; D.jabCount = 0;
+    return `Knockback ${power.toFixed(1)} m/s · +${CONFIG.sJabDamage}%`;
+  }
+
+  if (kind === 'SUPPERCUT') {
+    D.damage += CONFIG.sUppercutDamage; drawLabel();
+    const power = CONFIG.sUppercutLaunch * scale();
+    D.vel.copy(away).multiplyScalar(power * 0.25);
+    D.vel.y = power;
+    D.grounded = false; D.flinch = 0.5; D.jabCount = 0;
+    return `Launched ${power.toFixed(1)} m/s · +${CONFIG.sUppercutDamage}%`;
+  }
+
+  if (kind === 'SSLAM') {
+    D.damage += CONFIG.sSlamDamage; drawLabel();
+    D.jabCount = 0; D.flinch = 0.5;
+    if (D.grounded) {
+      const power = CONFIG.sSlamKnock * scale();
+      D.squash = 0.35;
+      D.vel.copy(away).multiplyScalar(power);
+      D.vel.y = power * 0.6;
+      D.grounded = false;
+      return `Slammed: knockback ${power.toFixed(1)} m/s · +${CONFIG.sSlamDamage}%`;
+    }
+    const power = CONFIG.sSlamSpike * scale();
+    D.vel.x *= 0.3; D.vel.z *= 0.3;
+    D.vel.y = -power;
+    return `Spiked down ${power.toFixed(1)} m/s · +${CONFIG.sSlamDamage}%`;
+  }
+
   if (kind === 'JAB') {
     if (now - D.lastJab > CONFIG.jabComboWindow) D.jabCount = 0;
     D.lastJab = now;
     D.jabCount++;
     if (D.jabCount < 4) {
       D.damage += CONFIG.jabDamage; drawLabel();
-      D.flinch = 0.35;
+      D.flinch = 0.35; D.stun = Math.max(D.stun, CONFIG.jabStun);
       return `Jab ${D.jabCount}/4: stunned · +${CONFIG.jabDamage}%`;
     }
     D.jabCount = 0;
@@ -607,7 +704,7 @@ function updateDummy(dt) {
   D.vel.y -= CONFIG.gravity * dt;
   dummy.position.addScaledVector(D.vel, dt);
   const p = dummy.position;
-  pushOutOfWalls(p, 0.15, D.vel);
+  pushOutOfWalls(p, 0.15, D.vel, prevY, 0.05);
   const g = groundUnder(p, prevY, 0);
   if (g !== null && D.vel.y <= 0) {
     p.y = g;
@@ -635,6 +732,10 @@ function updateDummy(dt) {
     sound(3, true);
   }
 
+  // Stunned dummies flash yellow (they'll be frozen in place once they can move on their own)
+  D.stun = Math.max(0, D.stun - dt);
+  dummyMat.emissive.setHex(D.stun > 0 && Math.sin(now * 25) > 0 ? 0x7a5a00 : 0x000000);
+
   D.flinch = Math.max(0, D.flinch - dt);
   D.squash = Math.max(0, D.squash - dt);
   pivot.rotation.x = -Math.sin(D.flinch * 30) * D.flinch * 0.6;
@@ -642,6 +743,26 @@ function updateDummy(dt) {
 }
 
 // ================= FEEDBACK =================
+// Attack trails: glowing dots left behind the fist that shrink and fade
+const trailGeo = new THREE.SphereGeometry(0.04, 8, 6);
+const trails = [];
+function spawnTrail(h, color) {
+  const m = new THREE.Mesh(trailGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false }));
+  h.grip.getWorldPosition(m.position);
+  m.userData.born = now;
+  scene.add(m);
+  trails.push(m);
+}
+function updateTrails() {
+  for (let i = trails.length - 1; i >= 0; i--) {
+    const m = trails[i];
+    const t = (now - m.userData.born) / 0.3;
+    if (t >= 1) { scene.remove(m); m.material.dispose(); trails.splice(i, 1); continue; }
+    m.material.opacity = 0.85 * (1 - t);
+    m.scale.setScalar(1 - t * 0.7);
+  }
+}
+
 function pulse(h, intensity, ms) {
   const act = h.src && h.src.gamepad && h.src.gamepad.hapticActuators && h.src.gamepad.hapticActuators[0];
   if (act && act.pulse) act.pulse(Math.min(1, intensity), ms);
@@ -731,10 +852,10 @@ function drawPanel() {
 // ================= COMPUTER TESTING =================
 const keyHand = { side: 'keyboard', src: null, fistMat: new THREE.MeshStandardMaterial(), cooldown: 0, flash: 0 };
 addEventListener('keydown', e => {
-  const kinds = { Digit1: 'JAB', Digit2: 'UPPERCUT', Digit3: 'POUND' };
+  const kinds = { Digit1: 'JAB', Digit2: 'UPPERCUT', Digit3: 'POUND', Digit4: 'RUNJAB', Digit5: 'SJAB', Digit6: 'SUPPERCUT', Digit7: 'SSLAM' };
   if (kinds[e.code]) {
     keyHand.cooldown = 0;
-    fireAttack(keyHand, kinds[e.code], 'keyboard test');
+    fireAttack(keyHand, kinds[e.code], 'keyboard test', F.clone());
   } else if (e.key.toLowerCase() === 'r') {
     resetDummy(); log('Dummy reset', '#8a93c4');
   }
@@ -765,8 +886,10 @@ renderer.setAnimationLoop(() => {
   if (F.lengthSq() < 1e-4) F.set(0, 0, -1);
   F.normalize();
 
+  updateTrails();
   for (const h of hands) {
     if (h.src && h.src.gamepad) updateHand(h, dt);
+    if (h.src && now < h.trailUntil) spawnTrail(h, h.trailColor);
     if (h.flash > 0) {
       h.flash -= dt;
       if (h.flash <= 0) h.fistMat.emissive.set(0x000000);
