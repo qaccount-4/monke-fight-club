@@ -88,8 +88,11 @@ const CONFIG = {
   sSlamBounceAway: 3.0,     // m/s: how far it bounces away from you (grows with damage)
   sSlamSpike: 12,            // m/s: special slam on an airborne dummy
   sSlamDrop: 8,              // m/s: how fast you drop straight down after a mid-air special slam
-  sUpperHop: 2.5,            // m/s: little hop when you special uppercut on the ground
-  sUpperRise: 7,             // m/s: how hard a mid-air special uppercut throws you up (7 = about 2.5 m, triple your height)
+  lightMoveDist: 2.5,        // m: how far a light uppercut / light pound carries you along the punch direction
+  lightMoveSpeed: 10,        // m/s: how fast that move is (2.5 m at 10 m/s = a quarter second)
+  airJabHold: 0.8,           // seconds you and the dummy hang still after a mid-air light jab (each jab resets it)
+  sUpperHop: 2.5,           // m/s: little hop when you special uppercut on the ground
+  sUpperRise: 5.7,           // m/s: how hard a mid-air special uppercut throws you up (5.7 = about 1.65 m, double your height)
   sJabDamage: 9, sUppercutDamage: 10, sSlamDamage: 10,
   knockScale: 60,           // damage % that doubles all knockback
   groundFriction: 5,         // how fast the dummy stops sliding
@@ -228,7 +231,10 @@ function nearSolid(p, gap) {
 const platformMat = new THREE.MeshStandardMaterial({ color: 0x7ff0ff, emissive: 0x2aa8c0, transparent: true, opacity: 0.8 });
 const airPlatforms = [];
 let platformsLeft = CONFIG.airPlatforms;
-let airUppercutReady = true;   // one rising special uppercut per trip through the air
+let airHoldUntil = 0;              // mid-air jab combo: you hang still until this time
+let attackMoveUntil = 0, attackMoveActive = false;
+const attackMoveVel = new THREE.Vector3();
+let airUppercutReady = true;  // one rising special uppercut per trip through the air
 
 function spawnPlatform(at) {
   const half = CONFIG.platformSize / 2, top = at.y - CONFIG.handRadius + 0.005;
@@ -299,7 +305,7 @@ const D = {
 function resetDummy() {
   dummy.position.copy(D.home);
   D.vel.set(0, 0, 0);
-  D.damage = 0; D.flinch = 0; D.squash = 0; D.grounded = true; D.ringOut = 0; D.jabCount = 0; D.stun = 0;
+  D.damage = 0; D.flinch = 0; D.squash = 0; D.grounded = true; D.ringOut = 0; D.jabCount = 0; D.stun = 0; D.holdUntil = 0;
   dummy.visible = true;
   drawLabel();
 }
@@ -406,6 +412,7 @@ function launchPlayer(vel, duration) {
   wasHolding = false;
   bodyVel.copy(vel);
   playerGrounded = false;
+  airHoldUntil = 0; attackMoveUntil = 0; attackMoveActive = false;
   dashUntil = now + duration;
 }
 
@@ -447,7 +454,14 @@ function updateMovement(dt) {
 
   // Falling (and sliding to a stop on the ground) when no hand is holding a surface
   if (!holding) {
-    bodyVel.y -= CONFIG.gravity * dt;
+    if (now < airHoldUntil && !playerGrounded) {
+      bodyVel.set(0, 0, 0);                 // hanging in the air during a mid-air jab combo
+    } else if (now < attackMoveUntil) {
+      bodyVel.copy(attackMoveVel);          // light uppercut / pound: straight-line move, no gravity
+    } else {
+      if (attackMoveActive) { attackMoveActive = false; bodyVel.multiplyScalar(0.25); }   // ease out of it
+      bodyVel.y -= CONFIG.gravity * dt;
+    }
     if (playerGrounded && now > dashUntil) {
       const k = Math.max(0, 1 - CONFIG.playerGroundFriction * dt);
       bodyVel.x *= k; bodyVel.z *= k;
@@ -645,7 +659,22 @@ function fireAttack(h, kind, detail, dir) {
     const flat = new THREE.Vector3(dir.x, 0, dir.z);
     if (flat.lengthSq() < 1e-4) flat.copy(F); else flat.normalize();
     launchPlayer(playerVelocity(new THREE.Vector3()).addScaledVector(flat, CONFIG.runBoost), 0.25);
-  } else if (kind === 'SUPPERCUT' && playerGrounded) {
+  }
+  // Dash jabs (running jab, moving special jab) stop you dead when they connect
+  if (hit && (kind === 'RUNJAB' || (kind === 'SJAB' && moving))) {
+    bodyVel.x = 0; bodyVel.z = 0;
+    posHistory.length = 0;   // so no leftover speed gets added back
+  }
+  if (kind === 'UPPERCUT' || kind === 'POUND') {
+    // Light uppercut / pound carry you along the punch direction
+    const d = dir.clone();
+    if (d.lengthSq() < 1e-6) d.set(0, kind === 'UPPERCUT' ? 1 : -1, 0); else d.normalize();
+    const t = CONFIG.lightMoveDist / CONFIG.lightMoveSpeed;
+    launchPlayer(d.clone().multiplyScalar(CONFIG.lightMoveSpeed), t);
+    attackMoveVel.copy(d).multiplyScalar(CONFIG.lightMoveSpeed);
+    attackMoveUntil = now + t; attackMoveActive = true;
+  }
+  if (kind === 'SUPPERCUT' && playerGrounded) {
     // Little hop straight up off the ground
     launchPlayer(new THREE.Vector3(0, CONFIG.sUpperHop, 0), 0.1);
   } else if (kind === 'SUPPERCUT' && airUppercutReady) {
@@ -685,6 +714,7 @@ function fireAttack(h, kind, detail, dir) {
 }
 
 function hitDummy(kind, away) {
+  D.holdUntil = 0;   // any new hit ends a mid-air jab freeze (a jab sets it again)
   const scale = () => 1 + D.damage / CONFIG.knockScale;
 
   if (kind === 'RUNJAB') {
@@ -734,7 +764,15 @@ function hitDummy(kind, away) {
     if (now - D.lastJab > CONFIG.jabComboWindow) D.jabCount = 0;
     D.lastJab = now;
     D.jabCount++;
+    // In mid-air (you or the dummy), a jab freezes both of you in place; keep jabbing to stay frozen
+    const inAir = !D.grounded || (!playerGrounded && !hands.some(o => o.touching));
+    if (inAir) {
+      airHoldUntil = now + CONFIG.airJabHold;
+      bodyVel.set(0, 0, 0);
+      attackMoveUntil = 0; attackMoveActive = false;
+    }
     if (D.jabCount < 4) {
+      if (inAir) { D.vel.set(0, 0, 0); D.holdUntil = now + CONFIG.airJabHold; }
       D.damage += CONFIG.jabDamage; drawLabel();
       D.flinch = 0.35; D.stun = Math.max(D.stun, CONFIG.jabStun);
       return `Jab ${D.jabCount}/4: stunned · +${CONFIG.jabDamage}%`;
@@ -783,7 +821,8 @@ function updateDummy(dt) {
   }
 
   const prevY = dummy.position.y;
-  D.vel.y -= CONFIG.gravity * dt;
+  if (now < D.holdUntil) D.vel.set(0, 0, 0);   // frozen in a mid-air jab combo
+  else D.vel.y -= CONFIG.gravity * dt;
   dummy.position.addScaledVector(D.vel, dt);
   const p = dummy.position;
   pushOutOfWalls(p, 0.15, D.vel, prevY, 0.05);
