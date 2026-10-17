@@ -67,7 +67,7 @@ const CONFIG = {
   jabFinisherKnock: 2.5,     // m/s: knockback from the 4th jab
   uppercutLaunch: 2.75,     // m/s: how hard the uppercut launches upward
   poundSpike: 9,             // m/s: how hard a ground pound slams an airborne dummy down
-  poundBounce: 3.5,          // m/s: how high the dummy pops up after a light ground pound (always the same, = 35% damage level)
+  poundBounce: 3.5,          // m/s: light ground pound launches the dummy this fast up AND this fast away (45°, same at any damage)
   bounciness: 0.35,          // how much a slammed dummy bounces off the floor (0 = none)
   jabStun: 0.5,              // seconds a light jab stuns the dummy
   // --- Running jab (a light jab while you're moving fast) ---
@@ -78,8 +78,6 @@ const CONFIG = {
   dashTime: 0.25,            // seconds the dash jab boost lasts; it can hit the dummy any time during it
   dashStopCloser: 0.2,       // m: dash jabs connect (and stop you) this much closer than normal punch range
   // --- Special attacks (hold grip and punch) ---
-  specialCharge: 0.2,        // seconds you hold grip with your fist still before a special is ready (fist glows)
-  chargeStillSpeed: 0.8,     // m/s: fist must move slower than this while winding up
   specialCooldown: 0.6,     // seconds before the same hand can do another special
   sJabCarry: 1.5,            // m/s: standing special jab: the punch's momentum carries you a little the way you punched
   sJabCarryTime: 0.12,       // seconds that momentum lasts before you slow down normally
@@ -611,16 +609,6 @@ function updateHand(h, dt) {
   const climbing = h.touching || now - h.lastTouch < 0.15;
   if (!(trig || grp) || blocking || climbing || now < h.cooldown || now < anyHandCooldown) {
     h.punching = false; h.peakSpeed = 0;
-    setCharge(h, false);
-    return;
-  }
-
-  // Specials need a wind-up: hold grip and keep your fist still for a moment until it glows
-  if (!special) setCharge(h, false);
-  else if (!h.charged) {
-    h.charge = speed < CONFIG.chargeStillSpeed ? (h.charge || 0) + dt : 0;   // moving restarts the wind-up
-    if (h.charge >= CONFIG.specialCharge) { setCharge(h, true); pulse(h, 0.35, 40); }
-    h.punching = false; h.peakSpeed = 0;
     return;
   }
 
@@ -644,16 +632,7 @@ function updateHand(h, dt) {
     if (kind) fireAttack(h, kind, `${s.toFixed(1)} m/s`, tmpV.copy(v).divideScalar(s));
     else log(`${h.side}: sideways swing (no attack yet)`, '#8a93c4');
     h.punching = false; h.peakSpeed = 0;
-    if (special) setCharge(h, false);   // a charged punch uses up the charge, even a sideways one
   }
-}
-
-// Wind-up state for specials; a charged fist glows dim orange
-function setCharge(h, on) {
-  if (!on) h.charge = 0;
-  if (h.charged === on) return;
-  h.charged = on;
-  if (!(h.flash > 0)) h.fistMat.emissive.set(on ? 0x8a2a00 : 0x000000);
 }
 
 
@@ -876,7 +855,7 @@ function hitDummy(kind, away) {
   D.jabCount = 0; D.flinch = 0.4;
   if (D.grounded) {
     D.squash = 0.3;
-    D.vel.copy(away).multiplyScalar(0.3);
+    D.vel.copy(away).multiplyScalar(CONFIG.poundBounce);   // out as fast as up = a 45° launch
     D.vel.y = CONFIG.poundBounce;   // same bounce at any damage
     D.grounded = false;
     return `Pounded into the ground · +${CONFIG.poundDamage}%`;
