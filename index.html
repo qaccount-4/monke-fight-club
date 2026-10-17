@@ -44,6 +44,7 @@ const CONFIG = {
   handRadius: 0.06,          // meters: size of each hand's collider
   jumpMultiplier: 1.3,       // how much speed you keep when you let go of a surface
   maxJumpSpeed: 6.5,         // m/s: fastest you can launch yourself
+  velocityLimit: 0.3,        // m/s: pushes slower than this don't carry you (so resting hands stay put)
   velocityFrames: 5,         // frames of hand motion averaged to find your launch speed
   releaseDistance: 0.003,    // meters: how far your hand must pull away from a surface to let go
   playerGroundFriction: 8,   // how fast you stop sliding when standing
@@ -75,7 +76,9 @@ const CONFIG = {
   runningJabDamage: 4,
   runBoost: 3.5,             // m/s: speed added in the punch direction by a running jab or a special jab while moving
   // --- Special attacks (hold grip and punch) ---
-  specialCooldown: 0.6,      // seconds before the same hand can do another special
+  specialCharge: 0.5,        // seconds you hold grip with your fist still before a special is ready (fist glows)
+  chargeStillSpeed: 0.8,     // m/s: fist must move slower than this while winding up
+  specialCooldown: 0.6,     // seconds before the same hand can do another special
   sJabCarry: 1.5,            // m/s: standing special jab: the punch's momentum carries you a little the way you punched
   sJabCarryTime: 0.12,       // seconds that momentum lasts before you slow down normally
   sJabKnock: 4.5,            // m/s: special jab knockback
@@ -467,6 +470,10 @@ function updateMovement(dt) {
       bodyVel.x *= k; bodyVel.z *= k;
     }
     P.addScaledVector(bodyVel, dt);
+  } else {
+    // Gorilla Tag style: while a hand is on a surface you still carry your push speed. If that speed
+    // pulls your hand off the surface, you launch at full push speed (no wrist flick needed).
+    P.addScaledVector(bodyVel, dt);
   }
 
   // Hands already holding on stay put; the body moves instead
@@ -544,7 +551,16 @@ function updateMovement(dt) {
     runSpeed = Math.max(speed, runSpeed * Math.pow(0.1, dt));   // remembers your speed for a moment
   }
   if (nowHolding) {
+    // Keep your push speed (times the jump boost) while holding; slow pushes don't count
     bodyVel.set(0, 0, 0);
+    if (posHistory.length > 1) {
+      const a = posHistory[0], b = posHistory[posHistory.length - 1];
+      if (b.t > a.t) tmpV.copy(b.p).sub(a.p).divideScalar(b.t - a.t);
+      if (b.t > a.t && tmpV.length() > CONFIG.velocityLimit) {
+        bodyVel.copy(tmpV).multiplyScalar(CONFIG.jumpMultiplier);
+        if (bodyVel.length() > CONFIG.maxJumpSpeed) bodyVel.setLength(CONFIG.maxJumpSpeed);
+      }
+    }
   } else if (wasHolding && posHistory.length > 1) {
     const a = posHistory[0], b = posHistory[posHistory.length - 1];
     if (b.t > a.t) {
@@ -592,6 +608,16 @@ function updateHand(h, dt) {
   const climbing = h.touching || now - h.lastTouch < 0.15;
   if (!(trig || grp) || blocking || climbing || now < h.cooldown || now < anyHandCooldown) {
     h.punching = false; h.peakSpeed = 0;
+    setCharge(h, false);
+    return;
+  }
+
+  // Specials need a wind-up: hold grip and keep your fist still for a moment until it glows
+  if (!special) setCharge(h, false);
+  else if (!h.charged) {
+    h.charge = speed < CONFIG.chargeStillSpeed ? (h.charge || 0) + dt : 0;   // moving restarts the wind-up
+    if (h.charge >= CONFIG.specialCharge) { setCharge(h, true); pulse(h, 0.35, 40); }
+    h.punching = false; h.peakSpeed = 0;
     return;
   }
 
@@ -615,7 +641,16 @@ function updateHand(h, dt) {
     if (kind) fireAttack(h, kind, `${s.toFixed(1)} m/s`, tmpV.copy(v).divideScalar(s));
     else log(`${h.side}: sideways swing (no attack yet)`, '#8a93c4');
     h.punching = false; h.peakSpeed = 0;
+    if (special) setCharge(h, false);   // a charged punch uses up the charge, even a sideways one
   }
+}
+
+// Wind-up state for specials; a charged fist glows dim orange
+function setCharge(h, on) {
+  if (!on) h.charge = 0;
+  if (h.charged === on) return;
+  h.charged = on;
+  if (!(h.flash > 0)) h.fistMat.emissive.set(on ? 0x8a2a00 : 0x000000);
 }
 
 
